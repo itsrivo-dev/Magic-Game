@@ -1,6 +1,6 @@
 {
   "name": "mag-ia",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Mag IA Telegram Mini App — fantasy idle RPG and secure Firebase backend",
   "main": "server.js",
@@ -11,7 +11,10 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
-    "check": "node scripts/check-game-syntax.js && node --check server.js && node --check client.js && node --check admin.js && node --check scripts/check-game-syntax.js && node --check scripts/migrate-firestore.js && node --check scripts/set-telegram-menu.js && node --check server/config.js && node --check server/app.js && node --check server/services.js && node --check server/game-state.js && node --check server/telegram.js && node --check server/session.js && node --check server/store.js",
+    "check": "node scripts/check-game-syntax.js && node --check server.js && node --check client.js && node --check admin.js && node --check scripts/check-game-syntax.js && node --check scripts/migrate-firestore.js && node --check scripts/set-telegram-menu.js && node --check scripts/configure-from-details.js && node --check server/config.js && node --check server/app.js && node --check server/services.js && node --check server/game-state.js && node --check server/telegram.js && node --check server/telegram-menu.js && node --check server/session.js && node --check server/store.js",
+    "configure": "node scripts/configure-from-details.js",
+    "configure:apply": "node scripts/configure-from-details.js --apply-local",
+    "configure:railway": "node scripts/configure-from-details.js --apply-railway",
     "migrate": "node scripts/migrate-firestore.js",
     "telegram:menu": "node scripts/set-telegram-menu.js"
   },

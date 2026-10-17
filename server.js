@@ -3,6 +3,7 @@
 const { loadConfig, getConfigReport } = require('./server/config');
 const { makeFirebaseStore } = require('./server/store');
 const { createApp } = require('./server/app');
+const { applyMenuButton } = require('./server/telegram-menu');
 
 let config;
 try {
@@ -32,6 +33,22 @@ const host = '0.0.0.0';
 const server = app.listen(port, host, () => {
   process.stdout.write(`[mag-ia] listening on ${host}:${port}; firebase=${firebase.store ? 'configured' : 'not_configured'}\n`);
 });
+
+// Once the real deployed HTTPS URL is known (PUBLIC_APP_URL, or the
+// Railway-generated RAILWAY_PUBLIC_DOMAIN), configure the bot menu button
+// automatically through the Telegram Bot API. Safe: the URL is validated
+// HTTPS first, and failures never expose the bot token.
+async function setupMenuButton() {
+  if (process.env.TELEGRAM_MENU_AUTO_SETUP === 'false') return;
+  if (!config.telegramBotToken || !config.publicAppUrl) return;
+  const result = await applyMenuButton(config, {
+    log: message => process.stdout.write(`[mag-ia] ${message}\n`)
+  });
+  if (!result.ok) {
+    process.stderr.write(`[mag-ia] telegram menu button not configured (${result.code}); run 'npm run telegram:menu' after setting PUBLIC_APP_URL.\n`);
+  }
+}
+setupMenuButton().catch(() => {});
 
 function stop(signal) {
   process.stdout.write(`[mag-ia] ${signal} received; shutting down\n`);
