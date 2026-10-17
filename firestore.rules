@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // All reads/writes go through the trusted Railway backend using Firebase Admin.
+    // There is intentionally no client-side Firestore access or client auth bypass.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

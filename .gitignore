@@ -1,0 +1,20 @@
+# Local environment and private configuration
+.env
+.env.*
+!.env.example
+/all_details.txt
+/all_details.local.txt
+/service-account*.json
+/credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependencies and generated output
+node_modules/
+coverage/
+dist/
+build/
+.DS_Store
+npm-debug.log*

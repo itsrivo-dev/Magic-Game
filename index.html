@@ -10,6 +10,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <title>Mag IA &middot; Arcane Idle RPG</title>
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
 <style>
 /* ==========================================================================
    MAG IA - single file build
@@ -568,6 +569,21 @@ html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="
   animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important;
 }
 html[data-motion="off"] .btn-collect.ready::after, html[data-motion="off"] .confetti{ display:none!important; }
+#maintenance-banner{position:sticky;top:0;z-index:80;padding:10px 14px;text-align:center;background:rgba(40,13,34,.96);border-bottom:1px solid rgba(255,97,128,.5);color:#ffdce3;font-weight:800;font-size:12px;}
+#maintenance-banner[data-kind="info"]{background:rgba(34,22,68,.96);border-color:var(--line-2);color:var(--ink-2);}
+.form-stack{display:flex;flex-direction:column;gap:9px;}
+.form-field{display:flex;flex-direction:column;gap:5px;min-width:0;}
+.form-field label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);font-weight:800;}
+.form-field input,.form-field select{width:100%;min-height:42px;border-radius:11px;padding:9px 11px;background:rgba(8,5,20,.78);border:1px solid var(--line-2);color:var(--ink);}
+.form-field input::placeholder{color:#75669e;}
+.form-field input:disabled,.form-field select:disabled{opacity:.5;}
+.account-link{overflow-wrap:anywhere;word-break:break-word;}
+#cloud-status,#acc-sync-state{font-size:11.5px;line-height:1.4;color:var(--ink-3);}
+#cloud-status[data-kind="good"],#acc-sync-state[data-kind="good"]{color:var(--green);}
+#cloud-status[data-kind="bad"],#acc-sync-state[data-kind="bad"]{color:var(--red);}
+#cloud-status[data-kind="info"],#acc-sync-state[data-kind="info"]{color:var(--ink-2);}
+#acc-ad-panel[hidden]{display:none!important;}
+@media (max-width:419px){.form-field input,.form-field select{min-height:44px}.tile{gap:8px;padding:9px}.tile-ic{width:40px;height:40px}}
 </style>
 </head>
 <body>
@@ -583,6 +599,7 @@ html[data-motion="off"] .btn-collect.ready::after, html[data-motion="off"] .conf
   </div>
 </div>
 
+<div id="maintenance-banner" data-kind="bad" role="status" hidden></div>
 <div id="app" aria-hidden="false">
   <!-- ===================== TOP BAR ===================== -->
   <header class="topbar">
@@ -899,14 +916,93 @@ html[data-motion="off"] .btn-collect.ready::after, html[data-motion="off"] .conf
         </div>
       </section>
 
+      <!-- ===================== ACCOUNT / TELEGRAM SERVICES ===================== -->
+      <section class="screen" id="screen-account" data-screen="account">
+        <div class="screen-head">
+          <div>
+            <h1 class="screen-title">Account <span>&amp; Services</span></h1>
+            <p class="screen-sub">Telegram identity, cloud progress, referrals and optional services.</p>
+          </div>
+          <button class="btn xs ghost" data-cloud-act="refresh-account" type="button">Refresh</button>
+        </div>
+        <div class="panel" id="account-panel">
+          <div class="panel-head"><span class="panel-title">Telegram Profile</span><span class="tag" id="acc-sync-state" data-kind="info">Checking connection…</span></div>
+          <div class="panel-body">
+            <div class="row spread wrap"><b id="acc-name">Not connected</b><span class="tiny muted" id="acc-username">Open Mag IA from the configured Telegram bot to sync progress.</span></div>
+            <div class="hint">Telegram identity is verified by the backend. Usernames and profile photos are optional; your immutable Telegram user ID identifies the account.</div>
+            <div class="row spread wrap small"><span class="muted">Real-money balance</span><b class="num" id="acc-real-balance">Not configured</b></div>
+            <div class="hint" id="acc-finance-status">Real-money payments are unavailable until a provider is configured and verified.</div>
+            <div class="hint">Magic Coins are game currency only and are not cash. Real-money balances are separate and can only be changed by verified backend transactions.</div>
+          </div>
+        </div>
+        <div class="panel" id="cloud-recovery-panel">
+          <div class="panel-head"><span class="panel-title">Local recovery copy</span><span class="tag" id="local-backup-tag">not created</span></div>
+          <div class="panel-body row spread wrap">
+            <div class="form-stack grow"><div class="hint" id="local-backup-status">Your device save remains available in Settings → Export.</div><div class="tiny muted">When cloud progress exists, the previous local save is retained as a separate recovery copy and is never silently uploaded over it.</div></div>
+            <button class="btn sm ghost" data-cloud-act="restore-local" type="button" disabled>Review recovery copy</button>
+          </div>
+        </div>
+        <div class="grid grid-2 wide-3">
+          <div class="panel">
+            <div class="panel-head"><span class="panel-title">Referral Circle</span><button class="btn xs ghost" data-cloud-act="copy-referral" type="button">Copy link</button></div>
+            <div class="panel-body">
+              <div class="row spread small"><span class="muted">Your code</span><b class="num gold" id="acc-referral-code">—</b></div>
+              <div class="hint account-link" id="acc-referral-link">Referral link appears after Telegram verification and bot URL configuration.</div>
+              <div class="list" id="acc-referrals"></div>
+              <div class="tiny muted">Self-referrals and duplicate rewards are rejected. A reward is shown as eligible only after server-side rules pass.</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span class="panel-title">Deposit Request</span><span class="tag" id="deposit-status-tag">unavailable</span></div>
+            <div class="panel-body">
+              <p class="hint" id="deposit-instructions">Unavailable — no verified deposit provider/instructions are configured.</p>
+              <form id="deposit-form" class="form-stack">
+                <div class="form-field"><label for="deposit-amount">Amount</label><input id="deposit-amount" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required disabled></div>
+                <div class="form-field"><label for="deposit-method">Payment method</label><select id="deposit-method" name="method" disabled></select></div>
+                <div class="form-field"><label for="deposit-reference">External transaction reference</label><input id="deposit-reference" name="transactionReference" maxlength="128" autocomplete="off" placeholder="Reference is not proof of payment" required disabled></div>
+                <button class="btn sm gold" type="submit" disabled>Submit for review</button>
+              </form>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span class="panel-title">Withdrawal Request</span><span class="tag" id="withdrawal-status-tag">unavailable</span></div>
+            <div class="panel-body">
+              <div class="hint">Withdrawals require a configured payout provider, available verified funds and external payout evidence. Submitting a request does not mean it has been paid.</div>
+              <form id="withdrawal-form" class="form-stack">
+                <div class="form-field"><label for="withdrawal-amount">Amount</label><input id="withdrawal-amount" name="amount" inputmode="decimal" autocomplete="off" placeholder="0.00" required disabled></div>
+                <div class="form-field"><label for="withdrawal-method">Payout method</label><select id="withdrawal-method" name="method" disabled></select></div>
+                <div class="form-field"><label for="withdrawal-destination">Payout destination</label><input id="withdrawal-destination" name="destination" maxlength="256" autocomplete="off" placeholder="Required payout details" required disabled></div>
+                <div class="form-field"><label for="withdrawal-name">Account name (if required)</label><input id="withdrawal-name" name="accountName" maxlength="100" autocomplete="name" placeholder="Optional" disabled></div>
+                <button class="btn sm gold" type="submit" disabled>Request withdrawal</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="panel-head"><span class="panel-title">Payment History</span></div>
+            <div class="panel-body list" id="acc-finance-history"><span class="hint">No transaction records.</span></div>
+          </div>
+          <div class="panel" id="acc-ad-panel" hidden>
+            <div class="panel-head"><span class="panel-title">Optional Rewarded Ad</span></div>
+            <div class="panel-body">
+              <div class="hint">This is optional. Magic Coins are granted only after a Monetag valued impression is confirmed by the backend postback; a frontend callback or click is not proof.</div>
+              <button class="btn sm gold wide" id="btn-rewarded-ad" data-cloud-act="rewarded-ad" type="button" disabled>Watch optional ad</button>
+              <div class="tiny muted" id="ad-reward-status">Rewarded advertising is not configured.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===================== SETTINGS ===================== -->
       <section class="screen" id="screen-settings" data-screen="settings">
         <div class="screen-head">
           <div>
             <h1 class="screen-title">Settings</h1>
-            <p class="screen-sub">Preferences are stored on this device only.</p>
+            <p class="screen-sub">Preferences are local; Telegram-launched progress syncs to your cloud save.</p>
           </div>
         </div>
+        <div class="panel"><div class="panel-body"><div class="row spread wrap"><span class="panel-title">Cloud save</span><span class="tiny muted" id="cloud-status" data-kind="info">Checking connection…</span></div></div></div>
         <div class="grid grid-2 wide-3">
           <div class="panel">
             <div class="panel-head"><span class="panel-title">Presentation</span></div>
@@ -922,7 +1018,7 @@ html[data-motion="off"] .btn-collect.ready::after, html[data-motion="off"] .conf
               <div class="row spread small"><span class="muted">Last save</span><b id="set-last-save">never</b></div>
               <div class="row spread small"><span class="muted">Play time</span><b id="set-playtime">0m</b></div>
               <div class="row spread small"><span class="muted">Storage key</span><b class="tiny" id="set-key">-</b></div>
-              <div class="hint">Progress lives in this browser&rsquo;s localStorage. Clearing site data, using another browser, or another device will lose it &mdash; export a save code to keep it.</div>
+              <div class="hint">A recoverable local copy is kept on this device. When you launch from the Telegram bot, validated game progress is synced to Firebase. Clearing browser data can remove the local copy; export a save code for backup. Imported saves never change real-money balances or transaction history.</div>
               <div class="grid grid-2">
                 <button class="btn sm" id="btn-save-now" data-act="save-now">Save now</button>
                 <button class="btn sm ghost" id="btn-export" data-act="export">Export</button>
@@ -955,6 +1051,7 @@ html[data-motion="off"] .btn-collect.ready::after, html[data-motion="off"] .conf
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 <div id="modal-root" role="dialog" aria-modal="true"></div>
 
+<script src="client.js" defer></script>
 <script>
 'use strict';
 /* ==========================================================================
@@ -1053,6 +1150,9 @@ const CONFIG = {
   OFFLINE_CAP_HOURS: 8,
   OFFLINE_MIN_SECONDS: 60,
   OFFLINE_EFFICIENCY: 0.55,
+  QUEST_REWARD_MULT: 1,
+  ACHIEVEMENT_REWARD_MULT: 1,
+  BATTLE_REWARD_MULT: 1,
   POUCH_MINUTES: 6,
   COLLECT_MIN: 1,
   HASTE_COOLDOWN: 120,
@@ -1565,19 +1665,26 @@ const Save = {
     return { fresh:false, storage:true, elapsed:elapsed, raw:parsed };
   },
   write(){
-    if(!S || !this.available) return false;
+    if(!S) return false;
     S.lastSaved = Date.now();
     S.lastSeen = Date.now();
-    try {
-      localStorage.setItem(CONFIG.SAVE_KEY, JSON.stringify(S));
-      return true;
-    } catch(e){
-      Toast.show('Could not save - browser storage is full or blocked.', 'bad');
-      return false;
+    let localSaved = false;
+    if(this.available){
+      try {
+        localStorage.setItem(CONFIG.SAVE_KEY, JSON.stringify(S));
+        localSaved = true;
+      } catch(e){
+        this.available = false;
+        Toast.show('Could not save locally - cloud sync may still be available in Telegram.', 'bad');
+      }
     }
+    if(window.MagIACloud && typeof window.MagIACloud.queueSave === 'function') window.MagIACloud.queueSave(S);
+    return localSaved;
   },
   request(force){
-    if(!this.available || !S) return;
+    if(!S) return;
+    const cloudReady = window.MagIACloud && window.MagIACloud.mode === 'cloud';
+    if(!this.available && !cloudReady) return;
     const now = Date.now();
     if(!force && now - B.save.last < CONFIG.SAVE_THROTTLE_MS){ B.save.pending = true; return; }
     B.save.last = now; B.save.pending = false;
@@ -1874,7 +1981,7 @@ const Quest = {
     (d.rewards || []).forEach(r => {
       for(const k in r){
         const v = Array.isArray(r[k]) ? (r[k][t] !== undefined ? r[k][t] : r[k][0]) : r[k];
-        out.push({ type:k, amount:U.safe(v, 1e12) });
+        out.push({ type:k, amount:Math.floor(U.safe(v * U.clamp(CONFIG.QUEST_REWARD_MULT, 0.1, 5), 1e12)) });
       }
     });
     return out;
@@ -1972,9 +2079,9 @@ const Ach = {
       n++;
       const parts = [];
       if(a.reward){
-        if(a.reward.coins){ Econ.addCoins(a.reward.coins, 'ach'); parts.push(U.fmt(a.reward.coins) + ' coins'); }
-        if(a.reward.xp){ Prog.addXp(a.reward.xp); parts.push(a.reward.xp + ' XP'); }
-        if(a.reward.relics){ S.relicPool = U.int(S.relicPool + a.reward.relics); parts.push(a.reward.relics + ' relics'); }
+        if(a.reward.coins){ const amount = Math.floor(a.reward.coins * CONFIG.ACHIEVEMENT_REWARD_MULT); Econ.addCoins(amount, 'ach'); parts.push(U.fmt(amount) + ' coins'); }
+        if(a.reward.xp){ const amount = Math.floor(a.reward.xp * CONFIG.ACHIEVEMENT_REWARD_MULT); Prog.addXp(amount); parts.push(amount + ' XP'); }
+        if(a.reward.relics){ const amount = Math.floor(a.reward.relics * CONFIG.ACHIEVEMENT_REWARD_MULT); S.relicPool = U.int(S.relicPool + amount); parts.push(amount + ' relics'); }
         if(a.reward.key){ S.battle.keys[a.reward.key] = true; parts.push('boss key'); }
       }
       Toast.show('Achievement: ' + a.name + (parts.length ? ' (+' + parts.join(', ') + ')' : ''), 'gold');
@@ -2161,13 +2268,13 @@ const Combat = {
       const step = Math.pow(c.bossStep, Math.max(0, Math.ceil(s / 5) - 1));
       return { hp:Math.ceil(c.baseHp * def.hp * c.bossHp * hpG * step),
                atk:Math.ceil(c.baseAtk * def.atk * c.bossAtk * atkG * step),
-               coins:Math.ceil(c.baseCoin * def.coins * c.bossCoin * coinG * step),
-               xp:Math.ceil(c.baseXp * def.xp * c.bossXp * Math.pow(c.xpG, s)) };
+               coins:Math.ceil(c.baseCoin * def.coins * c.bossCoin * coinG * step * CONFIG.BATTLE_REWARD_MULT),
+               xp:Math.ceil(c.baseXp * def.xp * c.bossXp * Math.pow(c.xpG, s) * CONFIG.BATTLE_REWARD_MULT) };
     }
     return { hp:Math.ceil(c.baseHp * def.hp * hpG),
              atk:Math.ceil(c.baseAtk * def.atk * atkG),
-             coins:Math.ceil(c.baseCoin * def.coins * coinG),
-             xp:Math.ceil(c.baseXp * def.xp * Math.pow(c.xpG, s)) };
+             coins:Math.ceil(c.baseCoin * def.coins * coinG * CONFIG.BATTLE_REWARD_MULT),
+             xp:Math.ceil(c.baseXp * def.xp * Math.pow(c.xpG, s) * CONFIG.BATTLE_REWARD_MULT) };
   },
   spellStats(id){
     const def = SPELLS.filter(s => s.id === id)[0];
@@ -4150,7 +4257,7 @@ const Render = {
         '<p><b>Idle.</b> Every mage in your circle mints Magic Coins continuously into a <b>pouch</b>. Tap <b>Blessing of Haste</b> (2 minute cooldown, 15 seconds of double output) just before collecting to squeeze more out of a full pouch. Coins gather in the <b>pouch</b>; tap <b>Collect</b> before it overflows. Leave the tab - the game keeps earning from real timestamps for up to ' + (CONFIG.OFFLINE_CAP_HOURS) + 'h at ' + U.pct(CONFIG.OFFLINE_EFFICIENCY) + ' rate (better tower floors help).</p>' +
         '<p><b>Battle.</b> Spend mana on spells, use <b>Focus Blast</b> to refill it, and read enemy traits in the Bestiary. Winning stages is the fastest coin income mid-game. Losing is free - you only burn a sliver of the pouch to retreat.</p>' +
         '<p><b>Growth.</b> Mage ranks raise both income and battle power. Tower floors multiply everything and unlock the Relic Forge. Spell gems tune your arsenal. Missions pay daily, achievements pay once.</p>' +
-        '<p class="muted">Magic Coins are an in-game currency with no real-world value. No account, no payments, no referral schemes - everything lives in this file and this browser.</p>';
+        '<p class="muted">Magic Coins are an in-game currency with no real-world value. Open inside Telegram for verified identity and Firebase cloud saves; standalone browser play remains local. Real-money features are disabled until real providers are configured.</p>';
     }
   }
 };
@@ -4432,7 +4539,7 @@ const UI = {
         '<li><b>Battle</b> stages for fat coin payouts; every 5th stage holds a boss.</li>' +
         '<li><b>Build</b> tower floors for multipliers, relics and the forge.</li>' +
         '<li><b>Claim</b> daily missions before midnight, then sleep.</li></ul>' +
-        '<p class="tiny muted">Single file, offline-capable, no account, no payments. Progress is stored only in this browser - use Settings &rarr; Export if you want a backup.</p>',
+        '<p class="tiny muted">Open from Telegram for cloud saves; standalone browser play keeps a local backup. Magic Coins have no cash value. Deposits and withdrawals stay disabled until verified providers are configured.</p>',
       actions:[
         { label:'Start idling', class:'gold', onClick:() => { S.flags.intro = true; Save.request(true); } }
       ]
@@ -4447,6 +4554,7 @@ const SCREENS = [
   { id:'mages', name:'Mages',   icon:'mage' },
   { id:'tower', name:'Build',   icon:'up' },
   { id:'quests',name:'Quests',  icon:'scroll' },
+  { id:'account',name:'Account',icon:'mage' },
   { id:'settings',name:'Config',icon:'gear' }
 ];
 const Router = {
@@ -4476,6 +4584,7 @@ const Router = {
     UI.haptic(6);
     B.navSeen = B.navSeen || {}; B.navSeen[id] = 1;
     Save.request();
+    if(id === 'account' && window.MagIACloud && typeof window.MagIACloud.refreshAccount === 'function') window.MagIACloud.refreshAccount().catch(() => {});
   }
 };
 
@@ -4612,6 +4721,7 @@ const Boot = {
     Loop.start();
     const boot = U.id('boot');
     const away = (res.elapsed || 0);
+    const telegramLaunch = !!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData);
     let pendingOffline = null;
     if(boot){
       let opened = false;
@@ -4631,9 +4741,9 @@ const Boot = {
       };
       if(enter){ enter.hidden = false; U.on(enter, 'click', () => { hide(); Audio.play('level'); }); }
       setTimeout(hide, 3600);         /* never trap a player behind the gate */
-      if(!res.fresh && away > CONFIG.OFFLINE_MIN_SECONDS){
+      if(!res.fresh && away > CONFIG.OFFLINE_MIN_SECONDS && !telegramLaunch){
         pendingOffline = Econ.applyOffline();
-      } else if(!res.fresh){
+      } else if(!res.fresh && !telegramLaunch){
         S.lastSeen = Date.now();
       }
       this.wireGate = hide;
@@ -4641,6 +4751,27 @@ const Boot = {
     if(res.corrupt) Toast.show('A save file was unreadable - starting a fresh tower. The broken copy was kept for inspection.', 'bad');
     if(!res.storage) Toast.show('Saved progress may not persist in this browser.', 'bad');
     this.afterLoad(false);
+    if(window.MagIACloud && typeof window.MagIACloud.bootstrap === 'function'){
+      const localSnapshot = JSON.parse(JSON.stringify(S));
+      window.MagIACloud.bootstrap(localSnapshot, !res.fresh && res.storage).then(result => {
+        if(!window.MagIA) return;
+        const runtime = window.MagIA.runtime();
+        if(!result || result.mode !== 'cloud' || !result.state){
+          if(telegramLaunch && !res.fresh){
+            const offline = runtime.Econ.applyOffline();
+            if(offline && offline.gain > 0) Toast.show('Local save kept · +' + U.fmt(offline.gain) + ' offline Magic Coins.', 'gold');
+            window.MagIA.save();
+          }
+          return;
+        }
+        if(!window.MagIA.load(result.state)) return;
+        const cloudRuntime = window.MagIA.runtime();
+        const offline = cloudRuntime.Econ.applyOffline();
+        if(offline && offline.gain > 0) Toast.show('Cloud save loaded · +' + U.fmt(offline.gain) + ' offline Magic Coins.', 'gold');
+        if(window.MagIACloud && typeof window.MagIACloud.activate === 'function') window.MagIACloud.activate();
+        window.MagIA.save();
+      }).catch(() => {});
+    }
   },
   afterLoad(reloaded){
     Quest.init();
@@ -4715,7 +4846,37 @@ window.MagIA = {
   stats:() => Prog.stats(),
   /* the modules below are the seams a future backend can drive directly */
   combat:Combat, econ:Econ, shop:Shop, quests:Quest, achievements:Ach, render:Render, router:Router, loop:Loop,
-  config:CONFIG, data:{ MAGES, SPELLS, ENEMIES, BOSSES, TOWER_FLOORS, RELICS, QUESTS, ACHIEVEMENTS, RARITY, ELEMENT },
+  config:CONFIG,
+  applyOperationalConfig:(publicConfig) => {
+    const game = publicConfig && publicConfig.game;
+    if(!game || typeof game !== 'object') return false;
+    const applyMap = (source, property, min, max) => {
+      if(!source || typeof source !== 'object' || Array.isArray(source)) return;
+      for(const id in source){
+        const def = MAGE_BY_ID[id], value = Number(source[id]);
+        if(def && isFinite(value) && value >= min && value <= max) def[property] = value;
+      }
+    };
+    applyMap(game.mageCosts, 'cost', 0, 1e12);
+    applyMap(game.mageCps, 'cps', 0, 1e12);
+    applyMap(game.mageUpgradeBaseCosts, 'upBase', 0, 1e12);
+    if(Array.isArray(game.towerCosts) && game.towerCosts.length === TOWER_FLOORS.length){
+      game.towerCosts.forEach((value,index) => { if(isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1e15) TOWER_FLOORS[index].cost = Number(value); });
+    }
+    if(Array.isArray(game.towerBonuses) && game.towerBonuses.length === TOWER_FLOORS.length){
+      game.towerBonuses.forEach((value,index) => { if(isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 5) TOWER_FLOORS[index].bonus = Number(value); });
+    }
+    CONFIG.QUEST_REWARD_MULT = U.clamp(game.questRewardMultiplier, 0.1, 5);
+    CONFIG.ACHIEVEMENT_REWARD_MULT = U.clamp(game.achievementRewardMultiplier, 0.1, 5);
+    CONFIG.BATTLE_REWARD_MULT = U.clamp(game.battleRewardMultiplier, 0.1, 5);
+    CONFIG.OFFLINE_CAP_HOURS = U.clamp(game.offlineCapHours, 1, 24);
+    CONFIG.OFFLINE_EFFICIENCY = U.clamp(game.offlineEfficiency, 0.1, 1);
+    Prog.invalidate();
+    Render.markAll();
+    Render.flush();
+    return true;
+  },
+  data:{ MAGES, SPELLS, ENEMIES, BOSSES, TOWER_FLOORS, RELICS, QUESTS, ACHIEVEMENTS, RARITY, ELEMENT },
   fmt:(n) => U.fmt(n), time:(n) => U.time(n), pct:(n, d) => U.pct(n, d), safe:(n) => U.safe(n),
   runtime:() => ({ S, B, Prog, Save, UI, Boot, FX, Audio, Sprites, Scene, BattleScene, Tower, newSave }),
   ui:(name) => UI[name]
