@@ -1,0 +1,43 @@
+{
+  "public": {
+    "appUrl": "",
+    "botUsername": "",
+    "miniAppShortName": ""
+  },
+  "telegram": {
+    "botToken": "__SET_TELEGRAM_BOT_TOKEN__",
+    "adminTelegramId": "__SET_ADMIN_TELEGRAM_ID__",
+    "botUsername": "",
+    "miniAppShortName": "",
+    "webAppUrl": ""
+  },
+  "session": {
+    "secret": "__GENERATE_A_RANDOM_SECRET_OF_AT_LEAST_32_BYTES__"
+  },
+  "firebase": {
+    "projectId": "__SET_FIREBASE_PROJECT_ID__",
+    "serviceAccountJson": ""
+  },
+  "monetag": {
+    "publisherId": "",
+    "mainZoneId": "",
+    "sdkUrl": "",
+    "postbackSecret": "",
+    "enabled": false
+  },
+  "payments": {
+    "provider": "disabled",
+    "payoutProvider": "disabled",
+    "currency": "",
+    "currencyExponent": 2,
+    "manualPaymentMethods": [],
+    "manualInstructions": "",
+    "minimumDepositMinor": 0,
+    "maximumDepositMinor": 0,
+    "minimumWithdrawalMinor": 0,
+    "maximumWithdrawalMinor": 0
+  },
+  "admin": {
+    "totpSecret": ""
+  }
+}
