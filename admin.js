@@ -20,10 +20,26 @@
       admin_totp_not_configured:'Finance remains locked until an administrator authenticator secret is configured.',
       admin_mfa_required:'Verify the administrator authenticator code before accessing financial records.',
       admin_mfa_code_invalid:'That authenticator code was not accepted.',
-      payment_provider_not_configured:'A payment provider is not configured; real-money workflows remain disabled.',
-      payout_provider_not_configured:'A payout provider is not configured; payouts remain disabled.',
+      payment_provider_not_configured:'No verified payment adapter is implemented; real-money workflows remain disabled.',
+      deposit_provider_not_configured:'No verified deposit adapter is available; deposits remain disabled.',
+      payout_provider_not_configured:'No verified payout adapter is available; withdrawals remain disabled.',
+      monetag_integration_not_verified:'Monetag remains disabled until its supported integration is implemented and verified.',
       monetag_postback_secret_not_configured:'A private Monetag postback secret is not configured.',
       monetag_sdk_or_zone_not_configured:'A valid Monetag SDK URL and zone are required before enabling ads.',
+      verified_revenue_source_not_configured:'Cash reward budgets stay at zero until settled revenue can be verified.',
+      magic_coin_reward_limits_not_configured:'Magic Coin reward claims are paused until all server-side caps are configured.',
+      magic_coin_user_daily_limit_reached:'The per-user daily Magic Coin reward cap has been reached.',
+      magic_coin_daily_budget_exhausted:'The global daily Magic Coin reward budget has been exhausted.',
+      magic_coin_monthly_budget_exhausted:'The global monthly Magic Coin reward budget has been exhausted.',
+      maintenance_mode:'The service is in maintenance mode; this operation is paused.',
+      pending_withdrawal_liability_limit_reached:'The global pending-withdrawal liability cap has been reached.',
+      pending_withdrawal_user_limit_reached:'The per-user pending-withdrawal cap has been reached.',
+      deposit_daily_amount_limit_reached:'The per-user daily deposit amount cap has been reached.',
+      withdrawal_daily_amount_limit_reached:'The per-user daily withdrawal amount cap has been reached.',
+      financial_ledger_discrepancy:'A ledger discrepancy was detected; the financial operation was blocked and logged.',
+      financial_ledger_corrupt:'Financial records need review; the operation was blocked and logged.',
+      pending_deposit_counter_discrepancy:'Pending deposit counters need reconciliation; the operation was blocked and logged.',
+      pending_withdrawal_counter_discrepancy:'Pending withdrawal counters need reconciliation; the operation was blocked and logged.',
       rate_limited:'Too many requests. Wait a moment and try again.'
     };
     return map[code]||String(code||'The request could not be completed.');
@@ -203,38 +219,89 @@
   }
   function fillSettings(settings){
     const s=settings.system||{},g=settings.game||{},a=settings.ads||{},p=settings.payments||{},r=settings.referrals||{};
+    const switches=s.emergencySwitches||{},limits=s.safetyLimits||{};
     const check=(id,val)=>{const input=$('#'+id);if(input)input.checked=val===true;};const put=(id,val)=>{const input=$('#'+id);if(input)input.value=val==null?'':String(val);};
-    check('sys-maintenance',s.maintenanceMode);put('sys-announcement',s.announcement||'');check('sys-real-money',s.realMoneyEnabled);
+    const disable=(id,value)=>{const input=$('#'+id);if(input)input.disabled=!!value;};
+    check('sys-maintenance',s.maintenanceMode);put('sys-announcement',s.announcement||'');check('sys-real-money',s.realMoneyEnabled);disable('sys-real-money',!p.providerVerified);
+    check('stop-deposits',switches.depositsPaused);check('stop-withdrawals',switches.withdrawalsPaused);check('stop-cash-rewards',switches.cashRewardsPaused);check('stop-coin-rewards',switches.magicCoinRewardsPaused);check('stop-referrals',switches.referralsPaused);check('stop-referral-rewards',switches.referralRewardsPaused);check('stop-monetization',switches.monetizationPaused);
+    const limitFields={
+      'limit-pending-withdrawal-global':'maxPendingWithdrawalLiabilityMinor','limit-pending-withdrawal-user':'maxPendingWithdrawalPerUserMinor',
+      'limit-withdrawals-daily-count':'maxWithdrawalsPerUserDaily','limit-withdrawals-daily-amount':'maxWithdrawalPerUserDailyMinor',
+      'limit-deposits-pending-count':'maxPendingDepositsPerUser','limit-deposits-daily-count':'maxDepositsPerUserDaily','limit-deposits-daily-amount':'maxDepositPerUserDailyMinor',
+      'limit-coin-reward-max':'maxMagicCoinsPerReward','limit-coin-user-daily':'maxMagicCoinsPerUserDaily','limit-coin-global-daily':'dailyMagicCoinsRewardBudget','limit-coin-global-monthly':'monthlyMagicCoinsRewardBudget',
+      'limit-cash-user':'maxCashRewardPerUserMinor','limit-cash-daily':'dailyCashRewardBudgetMinor','limit-cash-monthly':'monthlyCashRewardBudgetMinor','limit-cash-total':'maxTotalCashRewardLiabilityMinor'
+    };
+    for(const [id,key] of Object.entries(limitFields))put(id,limits[key]??0);
     put('game-quest-mult',g.questRewardMultiplier);put('game-ach-mult',g.achievementRewardMultiplier);put('game-battle-mult',g.battleRewardMultiplier);put('game-offline-cap',g.offlineCapHours);put('game-offline-eff',g.offlineEfficiency);
     put('game-mage-costs',JSON.stringify(g.mageCosts||{},null,2));put('game-mage-cps',JSON.stringify(g.mageCps||{},null,2));put('game-mage-upgrades',JSON.stringify(g.mageUpgradeBaseCosts||{},null,2));put('game-tower-costs',JSON.stringify(g.towerCosts||[]));put('game-tower-bonuses',JSON.stringify(g.towerBonuses||[]));
     check('ads-enabled',a.enabled);check('ads-interstitial',a.formats&&a.formats.inAppInterstitial);check('ads-rewarded',a.formats&&a.formats.rewardedInterstitial);put('ads-publisher',a.publisherId);put('ads-zone',a.mainZoneId);put('ads-reward-coins',a.rewardedMagicCoins);put('ads-frequency',a.interstitialFrequency);
+    disable('ads-enabled',settings.secretStatus?.monetagIntegrationVerified!==true);disable('ads-interstitial',settings.secretStatus?.monetagIntegrationVerified!==true);disable('ads-rewarded',settings.secretStatus?.monetagIntegrationVerified!==true||settings.secretStatus?.monetagPostbackSecretConfigured!==true);
     check('pay-deposits',p.depositsEnabled);check('pay-withdrawals',p.withdrawalsEnabled);put('pay-currency',p.currency);put('pay-exponent',p.currencyExponent);put('pay-min-deposit',p.minimumDepositMinor);put('pay-max-deposit',p.maximumDepositMinor);put('pay-min-withdrawal',p.minimumWithdrawalMinor);put('pay-max-withdrawal',p.maximumWithdrawalMinor);
+    disable('pay-deposits',p.providerVerified!==true);disable('pay-withdrawals',p.providerVerified!==true);
     check('ref-enabled',r.enabled);put('ref-level',r.qualificationLevel);put('ref-hours',r.qualificationHours);put('ref-reward',r.rewardMagicCoins);
   }
   function renderSecretStatus(secrets){
     const box=$('#settings-secret-status');box.replaceChildren();
-    const checks=[['Telegram Bot Token',secrets.telegramBotTokenConfigured],['Firebase Admin credential',secrets.firebaseAdminConfigured],['Session signing secret',secrets.sessionSecretConfigured],['Monetag SDK URL',secrets.monetagSdkUrlConfigured],['Monetag postback secret',secrets.monetagPostbackSecretConfigured],['Admin Telegram ID',secrets.adminTelegramIdConfigured],['Admin TOTP secret',secrets.adminTotpConfigured],['Payment provider configured',secrets.paymentProviderConfigured]];
-    const lines=checks.map(([name,configured])=>`${name}: ${configured?'configured':'not configured'}`).join(' · ');
-    box.append(node('div','small',lines));
-    box.append(node('div','tiny muted','Only configuration presence is shown. Secret values are never sent to this browser. Settled ad revenue is unavailable/unverified.'));
+    const checks=[
+      ['Telegram Bot Token format',secrets.telegramBotTokenConfigured],['Firebase Admin credential',secrets.firebaseAdminConfigured],
+      ['Session signing secret',secrets.sessionSecretConfigured],['Admin Telegram ID format',secrets.adminTelegramIdConfigured],
+      ['Admin TOTP secret',secrets.adminTotpConfigured],['Monetag SDK URL',secrets.monetagSdkUrlConfigured],
+      ['Monetag publisher ID',secrets.monetagPublisherConfigured],['Monetag postback secret',secrets.monetagPostbackSecretConfigured],
+      ['Monetag policy review',secrets.monetagPolicyReviewed],['Monetag integration verified',secrets.monetagIntegrationVerified],
+      ['Verified payment/payout adapter',secrets.paymentProviderConfigured]
+    ];
+    box.append(node('div','small',checks.map(([name,configured])=>`${name}: ${configured?'configured':'missing/unverified'}`).join(' · ')));
+    if(secrets.configurationSource)box.append(node('div','tiny muted',`Private configuration source: ${secrets.configurationSource}${secrets.privateConfigurationLoaded?' (loaded)':' (not loaded)'}.`));
+    if(secrets.sessionSecretSource)box.append(node('div','tiny muted',`Session key source: ${secrets.sessionSecretSource}.`));
+    if(Array.isArray(secrets.invalidConfigValues)&&secrets.invalidConfigValues.length)box.append(node('div','tiny muted',`Invalid configuration fields: ${secrets.invalidConfigValues.join(', ')}.`));
+    if(Array.isArray(secrets.configurationWarnings))for(const warning of secrets.configurationWarnings)box.append(node('div','tiny muted',warning));
+    box.append(node('div','tiny muted','Only credential presence, validation status and field names are shown. Secret values are never sent to this browser. Firebase Web configuration is not Firebase Admin access; ad estimates are not settled revenue.'));
   }
   function parseJsonField(id,expected){const raw=$('#'+id).value.trim();let value;try{value=JSON.parse(raw|| (expected==='array'?'[]':'{}'));}catch{throw new Error(`${id} must be valid JSON.`);}if(expected==='array'&&!Array.isArray(value))throw new Error(`${id} must be a JSON array.`);if(expected==='object'&&(!value||typeof value!=='object'||Array.isArray(value)))throw new Error(`${id} must be a JSON object.`);return value;}
   async function saveSettings(form){
     if(!state.settings){status('Load server settings before saving.','bad');return;}
     const value=id=>$('#'+id).value;
+    const amount=id=>Math.max(0,Math.trunc(Number(value(id))||0));
     try{
+      const emergencySwitches={depositsPaused:$('#stop-deposits').checked,withdrawalsPaused:$('#stop-withdrawals').checked,cashRewardsPaused:$('#stop-cash-rewards').checked,magicCoinRewardsPaused:$('#stop-coin-rewards').checked,referralsPaused:$('#stop-referrals').checked,referralRewardsPaused:$('#stop-referral-rewards').checked,monetizationPaused:$('#stop-monetization').checked};
+      const safetyLimits={maxPendingWithdrawalLiabilityMinor:amount('limit-pending-withdrawal-global'),maxPendingWithdrawalPerUserMinor:amount('limit-pending-withdrawal-user'),maxWithdrawalsPerUserDaily:amount('limit-withdrawals-daily-count'),maxWithdrawalPerUserDailyMinor:amount('limit-withdrawals-daily-amount'),maxPendingDepositsPerUser:amount('limit-deposits-pending-count'),maxDepositsPerUserDaily:amount('limit-deposits-daily-count'),maxDepositPerUserDailyMinor:amount('limit-deposits-daily-amount'),maxMagicCoinsPerReward:amount('limit-coin-reward-max'),maxMagicCoinsPerUserDaily:amount('limit-coin-user-daily'),dailyMagicCoinsRewardBudget:amount('limit-coin-global-daily'),monthlyMagicCoinsRewardBudget:amount('limit-coin-global-monthly'),maxCashRewardPerUserMinor:amount('limit-cash-user'),dailyCashRewardBudgetMinor:amount('limit-cash-daily'),monthlyCashRewardBudgetMinor:amount('limit-cash-monthly'),maxTotalCashRewardLiabilityMinor:amount('limit-cash-total')};
       const settings={
-        system:{maintenanceMode:$('#sys-maintenance').checked,announcement:value('sys-announcement'),realMoneyEnabled:$('#sys-real-money').checked},
+        system:{maintenanceMode:$('#sys-maintenance').checked,announcement:value('sys-announcement'),realMoneyEnabled:$('#sys-real-money').checked,emergencySwitches,safetyLimits},
         game:{questRewardMultiplier:Number(value('game-quest-mult')),achievementRewardMultiplier:Number(value('game-ach-mult')),battleRewardMultiplier:Number(value('game-battle-mult')),offlineCapHours:Number(value('game-offline-cap')),offlineEfficiency:Number(value('game-offline-eff')),mageCosts:parseJsonField('game-mage-costs','object'),mageCps:parseJsonField('game-mage-cps','object'),mageUpgradeBaseCosts:parseJsonField('game-mage-upgrades','object'),towerCosts:parseJsonField('game-tower-costs','array'),towerBonuses:parseJsonField('game-tower-bonuses','array')},
-        ads:{...state.settings.ads,enabled:$('#ads-enabled').checked,publisherId:value('ads-publisher'),mainZoneId:value('ads-zone'),rewardedMagicCoins:Number(value('ads-reward-coins'))||0,interstitialFrequency:Number(value('ads-frequency'))||1,formats:{...(state.settings.ads&&state.settings.ads.formats||{}),inAppInterstitial:$('#ads-interstitial').checked,rewardedInterstitial:$('#ads-rewarded').checked}},
-        payments:{depositsEnabled:$('#pay-deposits').checked,withdrawalsEnabled:$('#pay-withdrawals').checked,currency:value('pay-currency').toUpperCase(),currencyExponent:Number(value('pay-exponent'))||0,minimumDepositMinor:Number(value('pay-min-deposit'))||0,maximumDepositMinor:Number(value('pay-max-deposit'))||0,minimumWithdrawalMinor:Number(value('pay-min-withdrawal'))||0,maximumWithdrawalMinor:Number(value('pay-max-withdrawal'))||0},
-        referrals:{enabled:$('#ref-enabled').checked,qualificationLevel:Number(value('ref-level'))||1,qualificationHours:Number(value('ref-hours'))||0,rewardMagicCoins:Number(value('ref-reward'))||0}
+        ads:{...state.settings.ads,enabled:$('#ads-enabled').checked,publisherId:value('ads-publisher'),mainZoneId:value('ads-zone'),rewardedMagicCoins:amount('ads-reward-coins'),interstitialFrequency:Number(value('ads-frequency'))||1,formats:{...(state.settings.ads&&state.settings.ads.formats||{}),inAppInterstitial:$('#ads-interstitial').checked,rewardedInterstitial:$('#ads-rewarded').checked}},
+        payments:{depositsEnabled:$('#pay-deposits').checked,withdrawalsEnabled:$('#pay-withdrawals').checked,currency:value('pay-currency').toUpperCase(),currencyExponent:Number(value('pay-exponent'))||0,minimumDepositMinor:amount('pay-min-deposit'),maximumDepositMinor:amount('pay-max-deposit'),minimumWithdrawalMinor:amount('pay-min-withdrawal'),maximumWithdrawalMinor:amount('pay-max-withdrawal')},
+        referrals:{enabled:$('#ref-enabled').checked,qualificationLevel:Number(value('ref-level'))||1,qualificationHours:Number(value('ref-hours'))||0,rewardMagicCoins:amount('ref-reward')}
       };
-      if(settings.payments.depositsEnabled||settings.payments.withdrawalsEnabled||settings.system.realMoneyEnabled){if(!await requireFinance())return;}
+      const oldSystem=state.settings.system||{},oldSwitches=oldSystem.emergencySwitches||{},oldLimits=oldSystem.safetyLimits||{};
+      const unpausing=Object.keys(emergencySwitches).some(key=>key.endsWith('Paused')&&oldSwitches[key]===true&&emergencySwitches[key]===false);
+      const raisingLimit=Object.keys(safetyLimits).some(key=>safetyLimits[key]>Number(oldLimits[key]||0));
+      const oldPayments=state.settings.payments||{};
+      const enablingMoney=(settings.payments.depositsEnabled&&!oldPayments.depositsEnabled)||(settings.payments.withdrawalsEnabled&&!oldPayments.withdrawalsEnabled)||(settings.system.realMoneyEnabled&&!oldSystem.realMoneyEnabled);
+      const looseningMoney=Number(settings.payments.maximumDepositMinor)>Number(oldPayments.maximumDepositMinor||0)||Number(settings.payments.maximumWithdrawalMinor)>Number(oldPayments.maximumWithdrawalMinor||0)||Number(settings.payments.minimumDepositMinor)<Number(oldPayments.minimumDepositMinor||0)||Number(settings.payments.minimumWithdrawalMinor)<Number(oldPayments.minimumWithdrawalMinor||0)||settings.payments.currency!==String(oldPayments.currency||'').toUpperCase()||settings.payments.currencyExponent!==Number(oldPayments.currencyExponent||0);
+      if(unpausing||raisingLimit||enablingMoney||looseningMoney){if(!await requireFinance())return;}
       const result=await api('/api/admin/settings',{method:'PATCH',body:{settings}});state.settings=result.settings||state.settings;fillSettings(state.settings);renderSecretStatus(state.settings.secretStatus||{});status('Operational settings saved. Restart is not required; public runtime settings refresh on the next game bootstrap.','good');
     }catch(error){status(error.message||errMessage(error.code),'bad');}
   }
-  async function loadLogs(){const container=$('#admin-logs');setListMessage(container,'Loading audit log…');try{const data=await api('/api/admin/logs');container.replaceChildren();for(const row of data.logs||[]){const item=node('div','record');const main=node('div','record-main');main.append(node('div','record-title',row.action||'Action'),node('div','record-meta',`${dateTime(row.createdAtMs)} · admin ${String(row.actorUid||'').slice(-4)}${row.targetUid?' · target '+String(row.targetUid).slice(-4):''}${row.targetId?' · '+row.targetId:''}`));item.append(main);container.append(item);}if(!container.childElementCount)container.append(node('div','muted small','No audit records.'));}catch(error){setListMessage(container,errMessage(error.code));status(errMessage(error.code),'bad');}}
+  async function loadLogs(){
+    const container=$('#admin-logs');setListMessage(container,'Loading audit log…');
+    try{
+      const data=await api('/api/admin/logs');container.replaceChildren();
+      for(const row of data.logs||[]){
+        const item=node('div','record'),main=node('div','record-main'),details=row.details&&typeof row.details==='object'?row.details:{};
+        const meta=`${dateTime(row.createdAtMs)} · admin ${String(row.actorUid||'').slice(-4)}${row.targetUid?' · target '+String(row.targetUid).slice(-4):''}${row.targetId?' · '+row.targetId:''}`;
+        main.append(node('div','record-title',row.action||'Action'),node('div','record-meta',meta));
+        const safeParts=[];
+        if(Array.isArray(details.changedFields)&&details.changedFields.length)safeParts.push(`Fields: ${details.changedFields.slice(0,20).join(', ')}`);
+        else if(Array.isArray(details.changedSections)&&details.changedSections.length)safeParts.push(`Sections: ${details.changedSections.join(', ')}`);
+        if(Number.isSafeInteger(Number(details.amountMinor)))safeParts.push(`Amount minor units: ${number(details.amountMinor)}${details.currency?' '+String(details.currency).slice(0,3):''}`);
+        if(details.evidenceReference)safeParts.push('External evidence reference recorded');
+        if(Number.isSafeInteger(Number(details.noteLength)))safeParts.push(`Audit note length: ${number(details.noteLength)} characters`);
+        if(safeParts.length)main.append(node('div','record-meta',safeParts.join(' · ')));
+        item.append(main);container.append(item);
+      }
+      if(!container.childElementCount)container.append(node('div','muted small','No audit records.'));
+    }catch(error){setListMessage(container,errMessage(error.code));status(errMessage(error.code),'bad');}
+  }
   async function verifyMfa(form){const code=$('#mfa-code').value.trim();if(!/^\d{6}$/.test(code)){status('Enter a six-digit authenticator code.','bad');return;}try{await api('/api/admin/mfa',{method:'POST',body:{code}});state.mfaVerified=true;showShell();$('#mfa-code').value='';status('Administrator MFA verified for 15 minutes.','good');await loadOverview();if(state.activeTab==='deposits')await loadDeposits();if(state.activeTab==='withdrawals')await loadWithdrawals();if(state.activeTab==='transactions')await loadTransactions();}catch(error){status(errMessage(error.code),'bad');}}
   document.addEventListener('click',event=>{
     const tab=event.target.closest&&event.target.closest('[data-admin-tab]');if(tab){activateTab(tab.dataset.adminTab);return;}

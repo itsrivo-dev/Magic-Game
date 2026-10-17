@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 /all_details.txt
+/all details.txt
 /all_details.local.txt
 /service-account*.json
 /credentials*.json

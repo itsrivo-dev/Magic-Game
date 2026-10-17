@@ -85,17 +85,25 @@ function safeAdminSettings(settings,config) {
     system:settings.system,
     game:settings.game,
     ads:settings.ads,
-    payments:{...settings.payment,provider:config.paymentProvider,payoutProvider:config.payoutProvider,methods:config.manualPaymentMethods,instructionsConfigured:!!config.manualPaymentInstructions,currency:config.paymentCurrency||settings.payment.currency||''},
+    payments:{...settings.payment,...settings.payments,provider:settings.payments.provider,payoutProvider:settings.payments.payoutProvider,providerVerified:false,methods:[],instructionsConfigured:false,currency:config.paymentCurrency||settings.payment.currency||''},
     referrals:settings.referrals,
     secretStatus:{
       telegramBotTokenConfigured:!!config.telegramBotToken,
       firebaseAdminConfigured:!!(config.firebaseServiceAccount||config.firebaseCredentialsPath),
       sessionSecretConfigured:!!(config.sessionSecret&&Buffer.byteLength(config.sessionSecret)>=32),
+      sessionSecretSource:config.sessionSecretSource||'missing',
       monetagSdkUrlConfigured:!!config.monetagSdkUrl,
+      monetagPublisherConfigured:!!config.monetagPublisherId,
       monetagPostbackSecretConfigured:!!config.monetagPostbackSecret,
+      monetagPolicyReviewed:config.monetagPolicyReviewed===true,
+      monetagIntegrationVerified:config.monetagIntegrationVerified===true,
+      privateConfigurationLoaded:config.detailsFileLoaded===true,
+      configurationSource:config.detailsSource||'missing',
       adminTelegramIdConfigured:/^\d{1,20}$/.test(String(config.telegramAdminId||'')),
       adminTotpConfigured:!!config.adminTotpSecret,
       paymentProviderConfigured:settings.payments.provider!=='not_configured'||settings.payments.payoutProvider!=='not_configured',
+      invalidConfigValues:[...(config.invalidValues||[])],
+      configurationWarnings:[...(config.configWarnings||[])],
       revenueReporting:'unavailable_unverified'
     }
   };
@@ -208,14 +216,15 @@ function createApp(options = {}) {
     if(!config.telegramBotToken) throw new AppError(503,'telegram_bot_token_not_configured');
     let verified;
     try {
-      verified=verifyTelegramInitData(req.body&&req.body.initData,config.telegramBotToken,{maxAgeSeconds:86400});
+      verified=verifyTelegramInitData(req.body&&req.body.initData,config.telegramBotToken,{maxAgeSeconds:config.telegramInitDataMaxAgeSeconds||3600});
     } catch(error) {
       const failId=crypto.randomUUID();
       const ipDigest=crypto.createHmac('sha256',config.sessionSecret).update(String(req.ip||'unknown')).digest('hex');
       await store.set(`securityEvents/${failId}`,{id:failId,event:'telegram_auth_failed',errorCode:error.code||'invalid',ipHash:ipDigest,createdAt:store.timestamp(),createdAtMs:Date.now()}).catch(()=>{});
       throw error;
     }
-    const result=await ensureTelegramUser(store,verified,config);
+    const settings=await settingsForRequest();
+    const result=await ensureTelegramUser(store,verified,config,settings);
     const token=signSession(result.user.telegramId,config.sessionSecret);
     res.cookie(SESSION_COOKIE,token,cookieOptions(config,7*24*60*60*1000));
     res.clearCookie(MFA_COOKIE,{path:'/',httpOnly:true,secure:config.isProduction,sameSite:'strict'});
@@ -223,7 +232,6 @@ function createApp(options = {}) {
       const id=crypto.randomUUID();
       await store.set(`adminLogs/${id}`,{id,actorUid:result.user.telegramId,action:'admin.login',targetUid:result.user.telegramId,details:{method:'verified_telegram_init_data'},createdAt:store.timestamp(),createdAtMs:Date.now()});
     }
-    const settings=await settingsForRequest();
     const envelope=await profileEnvelope(store,result.user.telegramId,settings,config);
     const progress=await getGameProgress(store,result.user.telegramId);
     res.json({authenticated:true,created:result.created,profile:envelope.profile,game:{coins:envelope.game.coins,version:progress.version,hasProgress:progress.exists,state:progress.state,migrationStatus:progress.migrationStatus},realMoney:envelope.realMoney});
@@ -250,10 +258,14 @@ function createApp(options = {}) {
     res.json(progress);
   }));
   app.post('/api/game/initialize',requireStore,requireOrigin,requireSession,gameLimiter,asyncRoute(async(req,res)=>{
+    const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
     const progress=await initializeGameProgress(store,req.auth.uid,null,false);
     res.status(200).json(progress);
   }));
   app.post('/api/game/migrate',requireStore,requireOrigin,requireSession,gameLimiter,asyncRoute(async(req,res)=>{
+    const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
     if(!req.body||!req.body.state) throw new AppError(400,'migration_state_required');
     const existing=await getGameProgress(store,req.auth.uid);
     if(existing.exists) return res.status(200).json({...existing,migrationIgnored:true});
@@ -280,7 +292,9 @@ function createApp(options = {}) {
   }));
   app.get('/api/account/referrals',requireStore,requireSession,asyncRoute(async(req,res)=>res.json(await referralSummary(store,req.auth.uid,config))));
   app.post('/api/referrals/:referralId/claim',requireStore,requireOrigin,requireSession,sensitiveLimiter,asyncRoute(async(req,res)=>{
-    const result=await claimReferralReward(store,req.auth.uid,req.params.referralId);
+    const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+    const result=await claimReferralReward(store,req.auth.uid,req.params.referralId,settings);
     res.json({claimed:true,amountMagicCoins:result.amount,version:result.version,state:result.state});
   }));
   app.get('/api/account/finance',requireStore,requireSession,asyncRoute(async(req,res)=>{
@@ -289,16 +303,19 @@ function createApp(options = {}) {
   }));
   app.post('/api/deposits',requireStore,requireOrigin,requireSession,sensitiveLimiter,asyncRoute(async(req,res)=>{
     const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
     const result=await createDeposit(store,req.auth.uid,req.body,settings,req.get('idempotency-key'));
     res.status(result.replayed?200:201).json(result);
   }));
   app.post('/api/withdrawals',requireStore,requireOrigin,requireSession,sensitiveLimiter,asyncRoute(async(req,res)=>{
     const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
     const result=await createWithdrawal(store,req.auth.uid,req.body,settings,req.get('idempotency-key'));
     res.status(result.replayed?200:201).json(result);
   }));
   app.post('/api/ads/reward-session',requireStore,requireOrigin,requireSession,sensitiveLimiter,asyncRoute(async(req,res)=>{
     const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
     const row=await createAdRewardSession(store,req.auth.uid,settings);
     res.status(201).json({ymid:row.ymid,status:row.status,zoneId:settings.ads.mainZoneId,requestVar:settings.ads.placements.rewarded,rewardMagicCoins:row.rewardMagicCoins});
   }));
@@ -308,7 +325,9 @@ function createApp(options = {}) {
     res.json(safeAdStatus(row));
   }));
   app.post('/api/ads/:ymid/claim',requireStore,requireOrigin,requireSession,sensitiveLimiter,asyncRoute(async(req,res)=>{
-    const result=await claimAdReward(store,req.auth.uid,req.params.ymid);
+    const settings=await settingsForRequest();
+    if(settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+    const result=await claimAdReward(store,req.auth.uid,req.params.ymid,settings);
     res.json({claimed:true,amountMagicCoins:result.amount,version:result.version,state:result.state});
   }));
   app.get('/api/monetag/postback',makeLimiter(60*1000,240),requireStore,asyncRoute(async(req,res)=>{
@@ -359,15 +378,41 @@ function createApp(options = {}) {
     const patch=req.body&&req.body.settings;
     if(!patch||typeof patch!=='object'||Array.isArray(patch)) throw new AppError(400,'settings_object_required');
     const currentSettings=await settingsForRequest();
-    const financeFields=['depositsEnabled','withdrawalsEnabled','minimumDepositMinor','maximumDepositMinor','minimumWithdrawalMinor','maximumWithdrawalMinor','currency','currencyExponent'];
     const paymentPatch=patch.payments&&typeof patch.payments==='object'&&!Array.isArray(patch.payments)?patch.payments:{};
-    const financeSettingsChanged=financeFields.some(key=>{
-      if(!Object.hasOwn(paymentPatch,key)) return false;
-      const incoming=paymentPatch[key],current=currentSettings.payment[key];
-      if(typeof current==='number') return Number(incoming)!==current;
-      if(typeof current==='boolean') return incoming!==current;
-      return String(incoming??'').toUpperCase()!==String(current??'').toUpperCase();
-    })||(patch.system&&Object.hasOwn(patch.system,'realMoneyEnabled')&&patch.system.realMoneyEnabled!==currentSettings.system.realMoneyEnabled);
+    const systemPatch=patch.system&&typeof patch.system==='object'&&!Array.isArray(patch.system)?patch.system:{};
+    const financeSettingsChanged=(()=>{
+      for(const key of ['depositsEnabled','withdrawalsEnabled']) {
+        if(paymentPatch[key]===true&&currentSettings.payment[key]!==true) return true;
+      }
+      for(const key of ['maximumDepositMinor','maximumWithdrawalMinor']) {
+        if(Object.hasOwn(paymentPatch,key)&&Number(paymentPatch[key])>Number(currentSettings.payment[key]||0)) return true;
+      }
+      for(const key of ['minimumDepositMinor','minimumWithdrawalMinor']) {
+        if(Object.hasOwn(paymentPatch,key)&&Number(paymentPatch[key])<Number(currentSettings.payment[key]||0)) return true;
+      }
+      for(const key of ['currency','currencyExponent']) {
+        if(Object.hasOwn(paymentPatch,key)&&String(paymentPatch[key]??'').toUpperCase()!==String(currentSettings.payment[key]??'').toUpperCase()) return true;
+      }
+      if(systemPatch.realMoneyEnabled===true&&currentSettings.system.realMoneyEnabled!==true) return true;
+      const referralPatch=patch.referrals&&typeof patch.referrals==='object'&&!Array.isArray(patch.referrals)?patch.referrals:{};
+      if(referralPatch.enabled===true&&currentSettings.referrals.enabled!==true) return true;
+      if(Object.hasOwn(referralPatch,'rewardMagicCoins')&&Number(referralPatch.rewardMagicCoins)>Number(currentSettings.referrals.rewardMagicCoins||0)) return true;
+      const adPatch=patch.ads&&typeof patch.ads==='object'&&!Array.isArray(patch.ads)?patch.ads:{};
+      if(adPatch.enabled===true&&currentSettings.ads.enabled!==true) return true;
+      if(Object.hasOwn(adPatch,'rewardedMagicCoins')&&Number(adPatch.rewardedMagicCoins)>Number(currentSettings.ads.rewardedMagicCoins||0)) return true;
+      if(adPatch.formats&&adPatch.formats.rewardedInterstitial===true&&currentSettings.ads.formats.rewardedInterstitial!==true) return true;
+      const oldSwitches=currentSettings.system.emergencySwitches||{};
+      const incomingSwitches=systemPatch.emergencySwitches&&typeof systemPatch.emergencySwitches==='object'?systemPatch.emergencySwitches:{};
+      for(const [key,value] of Object.entries(incomingSwitches)) {
+        if(key.endsWith('Paused')&&value===false&&oldSwitches[key]===true) return true;
+      }
+      const oldLimits=currentSettings.system.safetyLimits||{};
+      const incomingLimits=systemPatch.safetyLimits&&typeof systemPatch.safetyLimits==='object'?systemPatch.safetyLimits:{};
+      for(const [key,value] of Object.entries(incomingLimits)) {
+        if(Number.isFinite(Number(value))&&Number(value)>Number(oldLimits[key]||0)) return true;
+      }
+      return false;
+    })();
     if(financeSettingsChanged&&config.adminTotpRequiredForFinance!==false) {
       if(!config.adminTotpSecret) throw new AppError(503,'admin_totp_not_configured');
       if(!verifyAdminMfa(parseCookies(req.headers.cookie)[MFA_COOKIE],req.auth.uid,config.sessionSecret)) throw new AppError(403,'admin_mfa_required');

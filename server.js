@@ -1,6 +1,6 @@
 'use strict';
 
-const { loadConfig } = require('./server/config');
+const { loadConfig, getConfigReport } = require('./server/config');
 const { makeFirebaseStore } = require('./server/store');
 const { createApp } = require('./server/app');
 
@@ -13,7 +13,19 @@ try {
   process.exit(1);
 }
 
+const report = getConfigReport(config);
+process.stdout.write(`[mag-ia] private configuration source=${report.source}; format=${report.format || 'n/a'}\n`);
+for (const warning of report.warnings) process.stderr.write(`[mag-ia] configuration warning: ${warning}\n`);
+if (report.requiredMissing.length) {
+  process.stderr.write(`[mag-ia] missing required configuration: ${report.requiredMissing.join(', ')}\n`);
+}
+if (report.invalidValues.length) {
+  process.stderr.write(`[mag-ia] invalid configuration fields (values redacted): ${report.invalidValues.join(', ')}\n`);
+}
+process.stdout.write(`[mag-ia] config status: Telegram=${report.telegramBotToken}, admin=${report.adminTelegramId}, Firebase Admin=${report.firebaseAdminCredentials}, Monetag=${report.monetag.enabled ? 'verified' : 'disabled'}, payments=disabled\n`);
+
 const firebase = makeFirebaseStore(config);
+if (!firebase.store) process.stderr.write(`[mag-ia] Firebase store unavailable (${firebase.reason || 'unknown'}); Telegram cloud APIs will fail closed.\n`);
 const app = createApp({ config, store: firebase.store, storeReason: firebase.reason });
 const port = Number(process.env.PORT) || config.port || 3000;
 const host = '0.0.0.0';
