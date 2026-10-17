@@ -45,11 +45,39 @@ const DEFAULT_REFERRAL_SETTINGS = Object.freeze({
   qualificationHours: 24,
   rewardMagicCoins: 0
 });
+const DEFAULT_EMERGENCY_SWITCHES = Object.freeze({
+  depositsPaused: true,
+  withdrawalsPaused: true,
+  cashRewardsPaused: true,
+  magicCoinRewardsPaused: true,
+  referralsPaused: false,
+  referralRewardsPaused: true,
+  monetizationPaused: true
+});
+const DEFAULT_SAFETY_LIMITS = Object.freeze({
+  maxPendingWithdrawalLiabilityMinor: 0,
+  maxPendingWithdrawalPerUserMinor: 0,
+  maxWithdrawalsPerUserDaily: 0,
+  maxWithdrawalPerUserDailyMinor: 0,
+  maxPendingDepositsPerUser: 0,
+  maxDepositsPerUserDaily: 0,
+  maxDepositPerUserDailyMinor: 0,
+  maxMagicCoinsPerReward: 0,
+  maxMagicCoinsPerUserDaily: 0,
+  dailyMagicCoinsRewardBudget: 0,
+  monthlyMagicCoinsRewardBudget: 0,
+  maxCashRewardPerUserMinor: 0,
+  dailyCashRewardBudgetMinor: 0,
+  monthlyCashRewardBudgetMinor: 0,
+  maxTotalCashRewardLiabilityMinor: 0
+});
 const DEFAULT_SYSTEM_SETTINGS = Object.freeze({
   maintenanceMode: false,
   announcement: '',
   realMoneyEnabled: false,
   rewardBudgetCapMinor: 0,
+  emergencySwitches: DEFAULT_EMERGENCY_SWITCHES,
+  safetyLimits: DEFAULT_SAFETY_LIMITS,
   supportedPaymentMethods: []
 });
 const DEFAULT_PAYMENT_SETTINGS = Object.freeze({
@@ -74,12 +102,16 @@ const FINANCE_DEFAULT = Object.freeze({
 });
 const MAX_LEDGER_AMOUNT = 1_000_000_000_000;
 const MAX_GAME_REWARD = 100_000_000;
-const RESERVED_COLLECTIONS = new Set(['users','gameProgress','balances','transactions','deposits','withdrawals','referrals','referralCodes','adminLogs','securityEvents','adminNotes','gameLedger','adRewards','idempotency','depositReferences','systemSettings','gameSettings','adSettings','paymentSettings','referralSettings','systemStats']);
+const RESERVED_COLLECTIONS = new Set(['users','gameProgress','balances','transactions','deposits','withdrawals','referrals','referralCodes','adminLogs','securityEvents','adminNotes','gameLedger','adRewards','idempotency','depositReferences','depositLimits','withdrawalLimits','rewardBudgets','systemSettings','gameSettings','adSettings','paymentSettings','referralSettings','systemStats']);
 
 function asInt(value, fallback = 0, min = 0, max = Number.MAX_SAFE_INTEGER) {
   const n = Number(value);
   if (!Number.isSafeInteger(n) || n < min || n > max) return fallback;
   return n;
+}
+function storedLedgerInt(value, fallback = -1, min = 0, max = MAX_LEDGER_AMOUNT) {
+  if (typeof value !== 'number') return fallback;
+  return asInt(value,fallback,min,max);
 }
 function asString(value, max = 256) { return typeof value === 'string' ? value.trim().slice(0, max) : ''; }
 function safeId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
@@ -116,6 +148,90 @@ function safeClientBalance(balance, payment) {
 }
 function isValidCode(value) { return typeof value === 'string' && /^[A-Z0-9]{6,16}$/.test(value); }
 function timestampValue(store) { return store.timestamp ? store.timestamp() : new Date(); }
+function utcPeriods(now = Date.now()) {
+  const date = new Date(now);
+  return { day:date.toISOString().slice(0,10), month:date.toISOString().slice(0,7) };
+}
+function recordSafetyBlock(tx, store, uid, operation, reason, details = {}) {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  const safeDetails = Object.fromEntries(Object.entries(details).filter(([,value]) =>
+    typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean'
+      || typeof value === 'string' && value.length <= 80
+  ));
+  tx.create(`securityEvents/${id}`,{
+    id,event:'safety_guard_blocked',operation,reason,userId:String(uid),details:safeDetails,
+    createdAt:timestampValue(store),createdAtMs:now
+  });
+  tx.create(`adminLogs/${id}`,{
+    id,actorUid:'system',action:'safety.guard.blocked',targetUid:String(uid),targetId:operation,
+    details:{reason,...safeDetails},createdAt:timestampValue(store),createdAtMs:now
+  });
+  return { blocked:true,code:reason };
+}
+function financialLedgerError(raw) {
+  if (!raw) return 'financial_ledger_uninitialized';
+  const finance = { ...FINANCE_DEFAULT,...cleanDoc(raw) };
+  const values = [
+    finance.verifiedDepositsMinor,finance.verifiedWithdrawalsMinor,finance.availableLiabilitiesMinor,
+    finance.reservedLiabilitiesMinor,finance.rewardExpensesMinor,
+    finance.pendingDeposits,finance.pendingWithdrawals
+  ].map(value => storedLedgerInt(value,-1,0,MAX_LEDGER_AMOUNT));
+  if (values.some(value => value < 0)) return 'financial_ledger_corrupt';
+  const [deposits,withdrawals,available,reserved,rewards] = values;
+  const expectedLiability = deposits - withdrawals - rewards;
+  if (expectedLiability < 0 || available + reserved !== expectedLiability) return 'financial_ledger_discrepancy';
+  return '';
+}
+async function planMagicCoinRewardBudget(tx, store, uid, amount, safetyLimits, source, now = Date.now()) {
+  const limits = normalizeSafetyLimits(safetyLimits);
+  const {day,month} = utcPeriods(now);
+  const baseDetails = {source,amountMagicCoins:amount};
+  if (amount <= 0 || amount > limits.maxMagicCoinsPerReward || limits.maxMagicCoinsPerReward <= 0
+      || limits.maxMagicCoinsPerUserDaily <= 0 || limits.dailyMagicCoinsRewardBudget <= 0
+      || limits.monthlyMagicCoinsRewardBudget <= 0) {
+    return recordSafetyBlock(tx,store,uid,source,'magic_coin_reward_limits_not_configured',baseDetails);
+  }
+  const userPath = `rewardBudgets/user_${uid}_day_${day}`;
+  const dayPath = `rewardBudgets/global_day_${day}`;
+  const monthPath = `rewardBudgets/global_month_${month}`;
+  const [userRaw,dayRaw,monthRaw] = await Promise.all([tx.get(userPath),tx.get(dayPath),tx.get(monthPath)]);
+  const count = (row,key,period) => {
+    if (!row || row.periodKey !== period) return 0;
+    return storedLedgerInt(row[key],-1,0,MAX_GAME_REWARD * 1_000_000);
+  };
+  const userTotal = count(userRaw,'amountMagicCoins',day);
+  const dailyTotal = count(dayRaw,'amountMagicCoins',day);
+  const monthlyTotal = count(monthRaw,'amountMagicCoins',month);
+  if (userTotal < 0 || dailyTotal < 0 || monthlyTotal < 0) {
+    return recordSafetyBlock(tx,store,uid,source,'magic_coin_reward_budget_discrepancy',baseDetails);
+  }
+  if (userTotal + amount > limits.maxMagicCoinsPerUserDaily) {
+    return recordSafetyBlock(tx,store,uid,source,'magic_coin_user_daily_limit_reached',{
+      ...baseDetails,limit:limits.maxMagicCoinsPerUserDaily,current:userTotal
+    });
+  }
+  if (dailyTotal + amount > limits.dailyMagicCoinsRewardBudget) {
+    return recordSafetyBlock(tx,store,uid,source,'magic_coin_daily_budget_exhausted',{
+      ...baseDetails,limit:limits.dailyMagicCoinsRewardBudget,current:dailyTotal
+    });
+  }
+  if (monthlyTotal + amount > limits.monthlyMagicCoinsRewardBudget) {
+    return recordSafetyBlock(tx,store,uid,source,'magic_coin_monthly_budget_exhausted',{
+      ...baseDetails,limit:limits.monthlyMagicCoinsRewardBudget,current:monthlyTotal
+    });
+  }
+  return {
+    userPath,dayPath,monthPath,day,month,
+    userTotal:userTotal+amount,dailyTotal:dailyTotal+amount,monthlyTotal:monthlyTotal+amount
+  };
+}
+function commitMagicCoinRewardBudget(tx, store, uid, plan, now = Date.now()) {
+  const updatedAt = timestampValue(store);
+  tx.set(plan.userPath,{userId:String(uid),periodKey:plan.day,amountMagicCoins:plan.userTotal,updatedAt,updatedAtMs:now},{merge:true});
+  tx.set(plan.dayPath,{periodKey:plan.day,amountMagicCoins:plan.dailyTotal,updatedAt,updatedAtMs:now},{merge:true});
+  tx.set(plan.monthPath,{periodKey:plan.month,amountMagicCoins:plan.monthlyTotal,updatedAt,updatedAtMs:now},{merge:true});
+}
 function appIdempotencyPath(uid, type, key) {
   if (typeof key !== 'string' || key.length < 16 || key.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(key)) throw new AppError(400, 'idempotency_key_required');
   return `idempotency/${sha256(`${uid}:${type}:${key}`)}`;
@@ -211,6 +327,22 @@ function normalizeReferralSettings(raw = {}) {
     rewardMagicCoins: asInt(src.rewardMagicCoins, 0, 0, MAX_GAME_REWARD)
   };
 }
+function normalizeEmergencySwitches(raw = {}) {
+  const src = cleanDoc(raw);
+  return Object.fromEntries(Object.keys(DEFAULT_EMERGENCY_SWITCHES).map(key => [
+    key,
+    Object.hasOwn(src,key) ? src[key] === true : DEFAULT_EMERGENCY_SWITCHES[key]
+  ]));
+}
+function normalizeSafetyLimits(raw = {}) {
+  const src = cleanDoc(raw);
+  const out = { ...DEFAULT_SAFETY_LIMITS };
+  for (const key of Object.keys(DEFAULT_SAFETY_LIMITS)) {
+    const max = key.includes('MagicCoins') ? MAX_GAME_REWARD : MAX_LEDGER_AMOUNT;
+    out[key] = asInt(src[key],DEFAULT_SAFETY_LIMITS[key],0,max);
+  }
+  return out;
+}
 function normalizeSystemSettings(raw = {}) {
   const src = cleanDoc(raw);
   const methods = Array.isArray(src.supportedPaymentMethods) ? src.supportedPaymentMethods.filter(m => typeof m === 'string' && /^[a-z0-9_-]{2,32}$/i.test(m)).slice(0,8) : [];
@@ -219,6 +351,8 @@ function normalizeSystemSettings(raw = {}) {
     announcement: asString(src.announcement, 500),
     realMoneyEnabled: src.realMoneyEnabled === true,
     rewardBudgetCapMinor: 0,
+    emergencySwitches: normalizeEmergencySwitches(src.emergencySwitches),
+    safetyLimits: normalizeSafetyLimits(src.safetyLimits),
     supportedPaymentMethods: methods
   };
 }
@@ -248,18 +382,32 @@ async function getOperationalSettings(store, config) {
   const ads = normalizeAdSettings({ ...DEFAULT_AD_SETTINGS, ...cleanDoc(adRaw) });
   if (!ads.publisherId && config.monetagPublisherId) ads.publisherId = String(config.monetagPublisherId).slice(0,64);
   if (!ads.mainZoneId && config.monetagMainZoneId) ads.mainZoneId = String(config.monetagMainZoneId);
+  if (config.monetagIntegrationVerified !== true) ads.enabled = false;
   const payment = normalizePaymentSettings(paymentRaw, config);
   const referrals = normalizeReferralSettings(referralRaw);
-  const paymentProviderConfigured = config.paymentProvider === 'manual' && !!config.paymentCurrency && !!config.manualPaymentInstructions && config.manualPaymentMethods.length > 0;
-  const payoutProviderConfigured = config.payoutProvider === 'manual' && !!config.paymentCurrency && config.manualPaymentMethods.length > 0;
-  const depositsEnabled = system.realMoneyEnabled && payment.depositsEnabled && paymentProviderConfigured;
-  const withdrawalsEnabled = system.realMoneyEnabled && payment.withdrawalsEnabled && payoutProviderConfigured;
-  const adsReady = ads.enabled && !!config.monetagSdkUrl && /^\d{1,20}$/.test(ads.mainZoneId);
+  const switches = system.emergencySwitches;
+  const limits = system.safetyLimits;
+
+  // No server-to-server payment/payout adapter is implemented or verified in this app.
+  // Manual notes or a provider name are not proof of payment, so production workflows stay off.
+  const paymentProviderConfigured = false;
+  const payoutProviderConfigured = false;
+  system.realMoneyEnabled = false;
+  const depositsEnabled = !switches.depositsPaused && system.realMoneyEnabled && payment.depositsEnabled && paymentProviderConfigured;
+  const withdrawalsEnabled = !switches.withdrawalsPaused && system.realMoneyEnabled && payment.withdrawalsEnabled && payoutProviderConfigured;
+  const adsReady = !switches.monetizationPaused && ads.enabled && config.monetagIntegrationVerified === true
+    && !!config.monetagSdkUrl && /^\d{1,20}$/.test(ads.mainZoneId);
+  const magicCoinRewardBudgetsConfigured = limits.maxMagicCoinsPerReward > 0
+    && limits.maxMagicCoinsPerUserDaily > 0
+    && limits.dailyMagicCoinsRewardBudget > 0
+    && limits.monthlyMagicCoinsRewardBudget > 0;
+  if (switches.referralsPaused || switches.referralRewardsPaused || switches.magicCoinRewardsPaused) referrals.enabled = false;
   return {
     system, game, ads, payment, referrals,
     payments: {
-      provider: paymentProviderConfigured ? 'manual_review' : 'not_configured',
-      payoutProvider: payoutProviderConfigured ? 'manual_review' : 'not_configured',
+      provider: 'not_configured',
+      payoutProvider: 'not_configured',
+      providerVerified: false,
       depositsEnabled,
       withdrawalsEnabled,
       currency: payment.currency,
@@ -268,31 +416,46 @@ async function getOperationalSettings(store, config) {
       maximumDepositMinor: payment.maximumDepositMinor || config.paymentMaxDepositMinor,
       minimumWithdrawalMinor: payment.minimumWithdrawalMinor || config.paymentMinWithdrawalMinor,
       maximumWithdrawalMinor: payment.maximumWithdrawalMinor || config.paymentMaxWithdrawalMinor,
-      methods: paymentProviderConfigured ? config.manualPaymentMethods.slice() : [],
-      instructions: depositsEnabled ? config.manualPaymentInstructions : '',
-      status: paymentProviderConfigured ? 'manual_external_review' : 'not_configured'
+      methods: [],
+      instructions: '',
+      status: 'provider_not_implemented'
     },
     adsReady,
-    rewardedReady: adsReady && ads.formats.rewardedInterstitial && !!config.monetagPostbackSecret && ads.rewardedMagicCoins > 0
+    rewardedReady: adsReady && !switches.adRewardsPaused && !switches.magicCoinRewardsPaused
+      && ads.formats.rewardedInterstitial && !!config.monetagPostbackSecret && ads.rewardedMagicCoins > 0
+      && magicCoinRewardBudgetsConfigured
   };
 }
 
 async function initializeSettings(store, config) {
   const now = Date.now();
+  const seed = cleanDoc(config.systemSettingsSeed);
+  const systemSeed = normalizeSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...cleanDoc(seed.system || seed) });
+  systemSeed.realMoneyEnabled=false;
+  systemSeed.rewardBudgetCapMinor=0;
+  systemSeed.emergencySwitches={...systemSeed.emergencySwitches,depositsPaused:true,withdrawalsPaused:true,cashRewardsPaused:true,magicCoinRewardsPaused:true,referralRewardsPaused:true,monetizationPaused:true};
+  const gameSeed = normalizeGameSettings({ ...DEFAULT_GAME_SETTINGS, ...cleanDoc(seed.game) });
+  const adSeed = normalizeAdSettings({ ...DEFAULT_AD_SETTINGS, ...cleanDoc(seed.ads) });
+  const paymentSeed = normalizePaymentSettings({
+    ...DEFAULT_PAYMENT_SETTINGS,
+    ...cleanDoc(seed.payments || seed.payment),
+    currency: config.paymentCurrency || (seed.payments && seed.payments.currency) || ''
+  },config);
+  const referralSeed = normalizeReferralSettings({ ...DEFAULT_REFERRAL_SETTINGS, ...cleanDoc(seed.referrals) });
   const defaults = [
-    ['systemSettings/public', DEFAULT_SYSTEM_SETTINGS],
-    ['gameSettings/current', DEFAULT_GAME_SETTINGS],
-    ['adSettings/current', DEFAULT_AD_SETTINGS],
+    ['systemSettings/public', systemSeed],
+    ['gameSettings/current', gameSeed],
+    ['adSettings/current', adSeed],
     ['paymentSettings/current', {
-      ...DEFAULT_PAYMENT_SETTINGS,
-      currency: config.paymentCurrency || '',
-      currencyExponent: Number.isInteger(config.paymentCurrencyExponent) ? config.paymentCurrencyExponent : 2,
-      minimumDepositMinor: config.paymentMinDepositMinor || 0,
-      maximumDepositMinor: config.paymentMaxDepositMinor || 0,
-      minimumWithdrawalMinor: config.paymentMinWithdrawalMinor || 0,
-      maximumWithdrawalMinor: config.paymentMaxWithdrawalMinor || 0
+      ...paymentSeed,
+      currency: config.paymentCurrency || paymentSeed.currency || '',
+      currencyExponent: Number.isInteger(config.paymentCurrencyExponent) ? config.paymentCurrencyExponent : paymentSeed.currencyExponent,
+      minimumDepositMinor: config.paymentMinDepositMinor || paymentSeed.minimumDepositMinor || 0,
+      maximumDepositMinor: config.paymentMaxDepositMinor || paymentSeed.maximumDepositMinor || 0,
+      minimumWithdrawalMinor: config.paymentMinWithdrawalMinor || paymentSeed.minimumWithdrawalMinor || 0,
+      maximumWithdrawalMinor: config.paymentMaxWithdrawalMinor || paymentSeed.maximumWithdrawalMinor || 0
     }],
-    ['referralSettings/current', DEFAULT_REFERRAL_SETTINGS],
+    ['referralSettings/current', referralSeed],
     ['systemStats/finance', { ...FINANCE_DEFAULT, updatedAtMs: now }]
   ];
   for (const [path, data] of defaults) {
@@ -337,11 +500,12 @@ function publicOperationalConfig(settings, config) {
   };
 }
 
-async function ensureTelegramUser(store, verified, config) {
+async function ensureTelegramUser(store, verified, config, settings = null) {
   const telegram = verified.user;
   const uid = String(telegram.id);
   const userPath = `users/${uid}`;
-  const referralParam = verified.startParam && verified.startParam.startsWith('ref_') ? verified.startParam.slice(4).toUpperCase() : '';
+  const referralsPaused = settings && settings.system && settings.system.emergencySwitches && settings.system.emergencySwitches.referralsPaused === true;
+  const referralParam = !referralsPaused && verified.startParam && verified.startParam.startsWith('ref_') ? verified.startParam.slice(4).toUpperCase() : '';
   const now = Date.now();
   const result = await store.runTransaction(async tx => {
     const old = await tx.get(userPath);
@@ -508,8 +672,10 @@ async function refreshReferralEligibility(store, refereeUid, referralSettings = 
   return true;
 }
 
-async function claimReferralReward(store, uid, referralId) {
+async function claimReferralReward(store, uid, referralId, settings = null) {
   if (!safeId(referralId) || referralId !== String(referralId)) throw new AppError(400, 'invalid_referral_id');
+  const switches=settings&&settings.system&&settings.system.emergencySwitches||{};
+  if (settings && (settings.system&&settings.system.maintenanceMode || settings.referrals && settings.referrals.enabled === false || switches.magicCoinRewardsPaused === true || switches.referralRewardsPaused === true)) throw new AppError(503,'referral_rewards_paused');
   const now = Date.now();
   const relationshipPath = `referrals/${referralId}`;
   const response = await store.runTransaction(async tx => {
@@ -523,20 +689,26 @@ async function claimReferralReward(store, uid, referralId) {
     const amount = asInt(relationship.rewardMagicCoins, 0, 1, MAX_GAME_REWARD);
     const state = sanitizeSave(progress.state, now);
     if (!state || state.coins + amount > 1e18) throw new AppError(409, 'game_reward_limit_reached');
+    const version = asInt(progress.version,1,1,1e9) + 1;
+    const ledgerPath = `gameLedger/referral_${referralId}`;
+    const existingLedger = await tx.get(ledgerPath);
+    if (existingLedger) throw new AppError(409, 'referral_reward_already_recorded');
+    const budget = await planMagicCoinRewardBudget(
+      tx,store,uid,amount,settings && settings.system && settings.system.safetyLimits,'referral',now
+    );
+    if (budget.blocked) return budget;
     state.coins += amount;
     state.earned.total += amount;
     state.earned.today += amount;
     state.lastSeen = now;
     state.lastSaved = now;
-    const version = asInt(progress.version,1,1,1e9) + 1;
-    const ledgerPath = `gameLedger/referral_${referralId}`;
-    const existingLedger = await tx.get(ledgerPath);
-    if (existingLedger) throw new AppError(409, 'referral_reward_already_recorded');
     tx.set(gamePath, { state, version, updatedAt:timestampValue(store), lastSyncAt:timestampValue(store), lastSyncAtMs:now }, { merge:true });
     tx.set(relationshipPath, { status:'rewarded', rewardedAt:timestampValue(store), rewardedAtMs:now }, { merge:true });
     tx.create(ledgerPath, { userId:uid, source:'referral', sourceId:referralId, currency:'MAGIC_COINS', amount, createdAt:timestampValue(store), createdAtMs:now });
+    commitMagicCoinRewardBudget(tx,store,uid,budget,now);
     return { amount, state, version };
   });
+  if (response && response.blocked) throw new AppError(409,response.code);
   return response;
 }
 
@@ -548,7 +720,10 @@ function parseMoneyDecimalToMicros(value) {
   return micros <= 1_000_000_000_000_000n ? micros.toString() : null;
 }
 async function createAdRewardSession(store, uid, settings) {
-  if (!settings.rewardedReady || !settings.adsReady || settings.ads.rewardedMagicCoins <= 0) throw new AppError(503, 'rewarded_ads_not_configured');
+  const switches=settings.system&&settings.system.emergencySwitches||{};
+  if (settings.system && settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+  if (switches.monetizationPaused===true||switches.adRewardsPaused===true||switches.magicCoinRewardsPaused===true
+      ||!settings.rewardedReady||!settings.adsReady||settings.ads.rewardedMagicCoins<=0) throw new AppError(503,'rewarded_ads_not_configured');
   const now = Date.now();
   const profilePath = `users/${uid}`;
   const id = crypto.randomUUID();
@@ -574,7 +749,7 @@ async function createAdRewardSession(store, uid, settings) {
 }
 
 async function acceptMonetagPostback(store, query, config) {
-  if (!config.monetagPostbackSecret) throw new AppError(503, 'monetag_postback_not_configured');
+  if (config.monetagIntegrationVerified !== true || !config.monetagPostbackSecret) throw new AppError(503, 'monetag_integration_not_verified');
   const secret = asString(query.secret, 256);
   const expected = Buffer.from(config.monetagPostbackSecret);
   const received = Buffer.from(secret);
@@ -609,35 +784,48 @@ async function acceptMonetagPostback(store, query, config) {
   });
 }
 
-async function claimAdReward(store, uid, ymid) {
+async function claimAdReward(store, uid, ymid, settings = null) {
   if (!/^[A-Za-z0-9._-]{8,128}$/.test(String(ymid || ''))) throw new AppError(400, 'invalid_ad_event_id');
+  const switches=settings&&settings.system&&settings.system.emergencySwitches||{};
+  if (!settings || !settings.rewardedReady || settings.system&&settings.system.maintenanceMode
+      ||switches.monetizationPaused===true||switches.adRewardsPaused===true||switches.magicCoinRewardsPaused===true) {
+    throw new AppError(503,'rewarded_ads_not_configured');
+  }
   const now = Date.now();
-  return store.runTransaction(async tx => {
+  const response = await store.runTransaction(async tx => {
     const adPath = `adRewards/${ymid}`;
     const ad = await tx.get(adPath);
     if (!ad || String(ad.userId) !== String(uid)) throw new AppError(404, 'ad_reward_not_found');
     if (ad.status === 'claimed') throw new AppError(409, 'ad_reward_already_claimed');
     if (ad.status !== 'ready' || ad.rewardEventType !== 'valued' || ad.eventType !== 'impression') throw new AppError(409, 'ad_reward_not_confirmed');
+    if (Number(ad.expiresAtMs) < now) throw new AppError(409,'ad_reward_expired');
     const gamePath = `gameProgress/${uid}`;
     const progress = await tx.get(gamePath);
     if (!progress || !progress.state) throw new AppError(409, 'game_progress_not_initialized');
     const amount = asInt(ad.rewardMagicCoins, 0, 1, MAX_GAME_REWARD);
     const state = sanitizeSave(progress.state, now);
     if (!state || state.coins + amount > 1e18) throw new AppError(409, 'game_reward_limit_reached');
+    const version = asInt(progress.version,1,1,1e9) + 1;
+    const ledgerPath = `gameLedger/ad_${ymid}`;
+    const ledger = await tx.get(ledgerPath);
+    if (ledger) throw new AppError(409, 'ad_reward_already_recorded');
+    const budget = await planMagicCoinRewardBudget(
+      tx,store,uid,amount,settings.system && settings.system.safetyLimits,'ad_reward',now
+    );
+    if (budget.blocked) return budget;
     state.coins += amount;
     state.earned.total += amount;
     state.earned.today += amount;
     state.lastSeen = now;
     state.lastSaved = now;
-    const version = asInt(progress.version,1,1,1e9) + 1;
-    const ledgerPath = `gameLedger/ad_${ymid}`;
-    const ledger = await tx.get(ledgerPath);
-    if (ledger) throw new AppError(409, 'ad_reward_already_recorded');
     tx.set(gamePath, { state, version, updatedAt:timestampValue(store), lastSyncAt:timestampValue(store), lastSyncAtMs:now }, { merge:true });
     tx.set(adPath, { status:'claimed', claimedAt:timestampValue(store), claimedAtMs:now }, { merge:true });
     tx.create(ledgerPath,{ userId:uid, source:'monetag_rewarded_interstitial', sourceId:ymid, currency:'MAGIC_COINS', amount, createdAt:timestampValue(store), createdAtMs:now });
+    commitMagicCoinRewardBudget(tx,store,uid,budget,now);
     return { amount, state, version };
   });
+  if (response && response.blocked) throw new AppError(409,response.code);
+  return response;
 }
 
 function updateFinanceStats(current, patch) {
@@ -648,102 +836,198 @@ async function getFinanceStats(store) {
 }
 
 async function createDeposit(store, uid, input, settings, idempotencyKey) {
-  if (!settings.payments.depositsEnabled) throw new AppError(503, 'deposits_not_configured');
+  const switches=settings.system&&settings.system.emergencySwitches||{};
+  if (settings.system&&settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+  if (switches.depositsPaused===true||!settings.system||settings.system.realMoneyEnabled!==true||!settings.payments.depositsEnabled) throw new AppError(503, 'deposits_not_configured');
+  if (settings.payments.providerVerified !== true) throw new AppError(503,'deposit_provider_not_configured');
   const amount = validateAmount(input && input.amountMinor);
   const method = asString(input && input.method,32).toLowerCase();
   const reference = asString(input && input.transactionReference,128);
   if (!settings.payments.methods.includes(method)) throw new AppError(400, 'unsupported_payment_method');
   if (reference.length < 4 || !/^[A-Za-z0-9._:/-]+$/.test(reference)) throw new AppError(400, 'invalid_transaction_reference');
-  if (amount < settings.payments.minimumDepositMinor || (settings.payments.maximumDepositMinor && amount > settings.payments.maximumDepositMinor)) throw new AppError(400, 'deposit_amount_out_of_range');
+  if (settings.payments.minimumDepositMinor <= 0 || settings.payments.maximumDepositMinor <= 0
+      || amount < settings.payments.minimumDepositMinor || amount > settings.payments.maximumDepositMinor) {
+    throw new AppError(400, 'deposit_amount_out_of_range');
+  }
+  const safety = normalizeSafetyLimits(settings.system && settings.system.safetyLimits);
   const idemPath = appIdempotencyPath(uid,'deposit',idempotencyKey);
   const referenceHash = sha256(`${method}:${stableString(reference)}`);
   const refPath = `depositReferences/${referenceHash}`;
+  const limitPath = `depositLimits/${uid}`;
   const id = crypto.randomUUID();
   const now = Date.now();
-  return store.runTransaction(async tx => {
-    const [idem, ref, finance] = await Promise.all([tx.get(idemPath),tx.get(refPath),tx.get('systemStats/finance')]);
-    if (idem) return { id:idem.resourceId, replayed:true };
-    if (ref) throw new AppError(409, 'deposit_reference_already_submitted');
+  const {day,month} = utcPeriods(now);
+  const result = await store.runTransaction(async tx => {
+    const [idem,ref,finance,limitDoc] = await Promise.all([
+      tx.get(idemPath),tx.get(refPath),tx.get('systemStats/finance'),tx.get(limitPath)
+    ]);
+    if (idem) return { id:idem.resourceId,replayed:true };
+    const ledgerError = financialLedgerError(finance);
+    if (ledgerError) return recordSafetyBlock(tx,store,uid,'deposit_request',ledgerError,{amountMinor:amount});
+    if (ref) return recordSafetyBlock(tx,store,uid,'deposit_request','deposit_reference_already_submitted',{amountMinor:amount});
+    if (safety.maxPendingDepositsPerUser <= 0 || safety.maxDepositsPerUserDaily <= 0 || safety.maxDepositPerUserDailyMinor <= 0) {
+      return recordSafetyBlock(tx,store,uid,'deposit_request','deposit_safety_limits_not_configured',{amountMinor:amount});
+    }
+    const pendingCount = limitDoc&&Object.hasOwn(limitDoc,'pendingCount')?storedLedgerInt(limitDoc.pendingCount,-1,0,MAX_LEDGER_AMOUNT):0;
+    const dailyCount = limitDoc && limitDoc.dayKey === day ? storedLedgerInt(limitDoc.dailyCount,-1,0,MAX_LEDGER_AMOUNT) : 0;
+    const dailyAmount = limitDoc && limitDoc.dayKey === day ? storedLedgerInt(limitDoc.dailyAmountMinor,-1,0,MAX_LEDGER_AMOUNT) : 0;
+    if (pendingCount<0||dailyCount<0||dailyAmount<0) return recordSafetyBlock(tx,store,uid,'deposit_request','deposit_limit_counter_discrepancy',{amountMinor:amount});
+    if (pendingCount + 1 > safety.maxPendingDepositsPerUser) {
+      return recordSafetyBlock(tx,store,uid,'deposit_request','pending_deposit_user_limit_reached',{amountMinor:amount,limit:safety.maxPendingDepositsPerUser,current:pendingCount});
+    }
+    if (dailyCount + 1 > safety.maxDepositsPerUserDaily) {
+      return recordSafetyBlock(tx,store,uid,'deposit_request','deposit_daily_count_limit_reached',{amountMinor:amount,limit:safety.maxDepositsPerUserDaily,current:dailyCount});
+    }
+    if (dailyAmount + amount > safety.maxDepositPerUserDailyMinor) {
+      return recordSafetyBlock(tx,store,uid,'deposit_request','deposit_daily_amount_limit_reached',{amountMinor:amount,limit:safety.maxDepositPerUserDailyMinor,current:dailyAmount});
+    }
     const row = {
-      id, userId:uid, amountMinor:amount, currency:settings.payments.currency,currencyExponent:settings.payments.currencyExponent,
-      method, userReference:reference, status:'pending', verificationMethod:'manual_external_review',
-      verifiedAtMs:null, evidenceReference:null, reason:null,
-      createdAt:timestampValue(store), createdAtMs:now, updatedAt:timestampValue(store), updatedAtMs:now
+      id,userId:uid,amountMinor:amount,currency:settings.payments.currency,currencyExponent:settings.payments.currencyExponent,
+      method,userReference:reference,status:'pending',verificationMethod:'manual_external_review',
+      verifiedAtMs:null,evidenceReference:null,reason:null,
+      createdAt:timestampValue(store),createdAtMs:now,updatedAt:timestampValue(store),updatedAtMs:now
     };
     tx.create(`deposits/${id}`,row);
     tx.create(`transactions/deposit_request_${id}`,{
       id:`deposit_request_${id}`,userId:uid,type:'deposit_request',amountMinor:amount,currency:row.currency,currencyExponent:row.currencyExponent,status:'pending',reference,
       createdAt:timestampValue(store),createdAtMs:now,completedAtMs:null
     });
-    tx.create(refPath,{ depositId:id,userId:uid,createdAt:timestampValue(store),createdAtMs:now });
-    tx.create(idemPath,{ userId:uid,operation:'deposit',resourceId:id,createdAt:timestampValue(store),createdAtMs:now });
-    tx.set('systemStats/finance',updateFinanceStats(finance,{ pendingDeposits:(Number(finance && finance.pendingDeposits)||0)+1 }),{ merge:true });
-    return { id, status:'pending', amountMinor:amount, currency:row.currency, manualReview:true };
+    tx.create(refPath,{depositId:id,userId:uid,createdAt:timestampValue(store),createdAtMs:now});
+    tx.create(idemPath,{userId:uid,operation:'deposit',resourceId:id,createdAt:timestampValue(store),createdAtMs:now});
+    tx.set(limitPath,{
+      userId:uid,dayKey:day,dailyCount:dailyCount+1,dailyAmountMinor:dailyAmount+amount,monthKey:month,
+      pendingCount:pendingCount+1,updatedAt:timestampValue(store),updatedAtMs:now
+    },{merge:true});
+    tx.set('systemStats/finance',updateFinanceStats(finance,{pendingDeposits:(Number(finance.pendingDeposits)||0)+1}),{merge:true});
+    return {id,status:'pending',amountMinor:amount,currency:row.currency,manualReview:true};
   });
+  if (result && result.blocked) throw new AppError(409,result.code);
+  return result;
 }
 
 async function createWithdrawal(store, uid, input, settings, idempotencyKey) {
-  if (!settings.payments.withdrawalsEnabled) throw new AppError(503, 'withdrawals_not_configured');
+  const switches=settings.system&&settings.system.emergencySwitches||{};
+  if (settings.system&&settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+  if (switches.withdrawalsPaused===true||!settings.system||settings.system.realMoneyEnabled!==true||!settings.payments.withdrawalsEnabled) throw new AppError(503, 'withdrawals_not_configured');
+  if (settings.payments.providerVerified !== true) throw new AppError(503,'payout_provider_not_configured');
   const amount = validateAmount(input && input.amountMinor);
-  if (amount < settings.payments.minimumWithdrawalMinor || (settings.payments.maximumWithdrawalMinor && amount > settings.payments.maximumWithdrawalMinor)) throw new AppError(400, 'withdrawal_amount_out_of_range');
+  if (settings.payments.minimumWithdrawalMinor <= 0 || settings.payments.maximumWithdrawalMinor <= 0
+      || amount < settings.payments.minimumWithdrawalMinor || amount > settings.payments.maximumWithdrawalMinor) {
+    throw new AppError(400,'withdrawal_amount_out_of_range');
+  }
   const payoutDetails = safePaymentDetails(input && input.payoutDetails,settings.payments.methods);
+  const safety = normalizeSafetyLimits(settings.system && settings.system.safetyLimits);
   const idemPath = appIdempotencyPath(uid,'withdrawal',idempotencyKey);
   const balancePath = `balances/${uid}`;
+  const limitPath = `withdrawalLimits/${uid}`;
   const id = crypto.randomUUID();
   const now = Date.now();
-  return store.runTransaction(async tx => {
-    const [idem,balance,finance] = await Promise.all([tx.get(idemPath),tx.get(balancePath),tx.get('systemStats/finance')]);
-    if (idem) return { id:idem.resourceId,replayed:true };
-    const available = asInt(balance && balance.availableMinor,0,0,MAX_LEDGER_AMOUNT);
-    const reserved = asInt(balance && balance.reservedMinor,0,0,MAX_LEDGER_AMOUNT);
+  const {day,month} = utcPeriods(now);
+  const result = await store.runTransaction(async tx => {
+    const [idem,balance,finance,limitDoc] = await Promise.all([
+      tx.get(idemPath),tx.get(balancePath),tx.get('systemStats/finance'),tx.get(limitPath)
+    ]);
+    if (idem) return {id:idem.resourceId,replayed:true};
+    const ledgerError = financialLedgerError(finance);
+    if (ledgerError) return recordSafetyBlock(tx,store,uid,'withdrawal_request',ledgerError,{amountMinor:amount});
+    if (safety.maxPendingWithdrawalLiabilityMinor <= 0 || safety.maxPendingWithdrawalPerUserMinor <= 0
+        || safety.maxWithdrawalsPerUserDaily <= 0 || safety.maxWithdrawalPerUserDailyMinor <= 0) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','withdrawal_safety_limits_not_configured',{amountMinor:amount});
+    }
+    const available = storedLedgerInt(balance && balance.availableMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const reserved = storedLedgerInt(balance && balance.reservedMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const globalReserved = storedLedgerInt(finance.reservedLiabilitiesMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const globalAvailable = storedLedgerInt(finance.availableLiabilitiesMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const dailyCount = limitDoc && limitDoc.dayKey === day ? storedLedgerInt(limitDoc.dailyCount,-1,0,MAX_LEDGER_AMOUNT) : 0;
+    const dailyAmount = limitDoc && limitDoc.dayKey === day ? storedLedgerInt(limitDoc.dailyAmountMinor,-1,0,MAX_LEDGER_AMOUNT) : 0;
+    if (available<0||reserved<0||globalReserved<0||globalAvailable<0||dailyCount<0||dailyAmount<0) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','withdrawal_limit_counter_discrepancy',{amountMinor:amount});
+    }
     if (available < amount) throw new AppError(409,'insufficient_available_balance');
-    if (available + reserved > MAX_LEDGER_AMOUNT || reserved > MAX_LEDGER_AMOUNT - amount) throw new AppError(409,'ledger_balance_limit_reached');
+    if (globalAvailable < amount || available + reserved > MAX_LEDGER_AMOUNT || reserved > MAX_LEDGER_AMOUNT - amount) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','financial_ledger_discrepancy',{amountMinor:amount});
+    }
+    if (globalReserved + amount > safety.maxPendingWithdrawalLiabilityMinor) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','pending_withdrawal_liability_limit_reached',{
+        amountMinor:amount,limit:safety.maxPendingWithdrawalLiabilityMinor,current:globalReserved
+      });
+    }
+    if (reserved + amount > safety.maxPendingWithdrawalPerUserMinor) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','pending_withdrawal_user_limit_reached',{
+        amountMinor:amount,limit:safety.maxPendingWithdrawalPerUserMinor,current:reserved
+      });
+    }
+    if (dailyCount + 1 > safety.maxWithdrawalsPerUserDaily) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','withdrawal_daily_count_limit_reached',{
+        amountMinor:amount,limit:safety.maxWithdrawalsPerUserDaily,current:dailyCount
+      });
+    }
+    if (dailyAmount + amount > safety.maxWithdrawalPerUserDailyMinor) {
+      return recordSafetyBlock(tx,store,uid,'withdrawal_request','withdrawal_daily_amount_limit_reached',{
+        amountMinor:amount,limit:safety.maxWithdrawalPerUserDailyMinor,current:dailyAmount
+      });
+    }
     const row = {
       id,userId:uid,amountMinor:amount,currency:settings.payments.currency,currencyExponent:settings.payments.currencyExponent,status:'pending',
-      payoutDetails, payoutReference:null, verificationMethod:'manual_external_payout',
-      reason:null, createdAt:timestampValue(store),createdAtMs:now,updatedAt:timestampValue(store),updatedAtMs:now,
+      payoutDetails,payoutReference:null,verificationMethod:'manual_external_payout',
+      reason:null,createdAt:timestampValue(store),createdAtMs:now,updatedAt:timestampValue(store),updatedAtMs:now,
       reservedAtMs:now,releasedAtMs:null,paidAtMs:null
     };
-    tx.set(balancePath,{ userId:uid,currency:settings.payments.currency,availableMinor:available-amount,reservedMinor:reserved+amount,updatedAt:timestampValue(store) },{ merge:true });
+    tx.set(balancePath,{userId:uid,currency:settings.payments.currency,availableMinor:available-amount,reservedMinor:reserved+amount,updatedAt:timestampValue(store)},{merge:true});
     tx.create(`withdrawals/${id}`,row);
     tx.create(`transactions/withdrawal_reserve_${id}`,{
       id:`withdrawal_reserve_${id}`,userId:uid,type:'withdrawal_reserve',amountMinor:amount,currency:row.currency,currencyExponent:row.currencyExponent,status:'reserved',reference:id,
       createdAt:timestampValue(store),createdAtMs:now,completedAtMs:null
     });
-    tx.create(idemPath,{ userId:uid,operation:'withdrawal',resourceId:id,createdAt:timestampValue(store),createdAtMs:now });
+    tx.create(idemPath,{userId:uid,operation:'withdrawal',resourceId:id,createdAt:timestampValue(store),createdAtMs:now});
+    tx.set(limitPath,{userId:uid,dayKey:day,monthKey:month,dailyCount:dailyCount+1,dailyAmountMinor:dailyAmount+amount,updatedAt:timestampValue(store),updatedAtMs:now},{merge:true});
     tx.set('systemStats/finance',updateFinanceStats(finance,{
-      pendingWithdrawals:(Number(finance && finance.pendingWithdrawals)||0)+1,
-      availableLiabilitiesMinor:Math.max(0,(Number(finance && finance.availableLiabilitiesMinor)||0)-amount),
-      reservedLiabilitiesMinor:(Number(finance && finance.reservedLiabilitiesMinor)||0)+amount
+      pendingWithdrawals:(Number(finance.pendingWithdrawals)||0)+1,
+      availableLiabilitiesMinor:globalAvailable-amount,
+      reservedLiabilitiesMinor:globalReserved+amount
     }),{merge:true});
-    return { id,status:'pending',amountMinor:amount,currency:row.currency,manualReview:true };
+    return {id,status:'pending',amountMinor:amount,currency:row.currency,manualReview:true};
   });
+  if (result && result.blocked) throw new AppError(409,result.code);
+  return result;
 }
 
 async function decideDeposit(store, actorUid, depositId, input, config, settings) {
-  if (!settings.payments.depositsEnabled) throw new AppError(503,'deposits_not_configured');
   const decision = asString(input && input.decision,16).toLowerCase();
   if (!['approve','reject'].includes(decision)) throw new AppError(400,'invalid_deposit_decision');
+  const switches=settings.system&&settings.system.emergencySwitches||{};
+  if (decision==='approve'&&settings.system&&settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+  if (decision==='approve'&&(switches.depositsPaused===true||!settings.system||settings.system.realMoneyEnabled!==true||!settings.payments.depositsEnabled)) throw new AppError(503,'deposits_not_configured');
+  if (decision==='approve'&&settings.payments.providerVerified!==true) throw new AppError(503,'deposit_provider_not_configured');
   const evidence = decision === 'approve' ? validateEvidence(input && input.evidenceReference) : null;
   const reason = asString(input && input.reason,500);
   if (decision === 'reject' && reason.length < 4) throw new AppError(400,'rejection_reason_required');
   const path = `deposits/${depositId}`;
   const now = Date.now();
-  return store.runTransaction(async tx => {
+  const result = await store.runTransaction(async tx => {
     const deposit = await tx.get(path);
     if (!deposit) throw new AppError(404,'deposit_not_found');
     if (deposit.status !== 'pending') throw new AppError(409,'deposit_not_pending');
-    if (decision === 'approve' && config.paymentProvider !== 'manual') throw new AppError(503,'provider_verification_not_configured');
     const userBalancePath = `balances/${deposit.userId}`;
+    const limitPath = `depositLimits/${deposit.userId}`;
     const creditPath = `transactions/deposit_credit_${depositId}`;
-    const [finance,balance] = await Promise.all([
-      tx.get('systemStats/finance'),tx.get(userBalancePath)
+    const [finance,balance,limitDoc] = await Promise.all([
+      tx.get('systemStats/finance'),tx.get(userBalancePath),tx.get(limitPath)
     ]);
     const existingCredit = decision === 'approve' ? await tx.get(creditPath) : null;
     if (existingCredit) throw new AppError(409,'deposit_already_credited');
-    const amount = asInt(deposit.amountMinor,0,1,MAX_LEDGER_AMOUNT);
-    const oldAvailable = asInt(balance && balance.availableMinor,0,0,MAX_LEDGER_AMOUNT);
-    if(decision==='approve' && oldAvailable > MAX_LEDGER_AMOUNT-amount) throw new AppError(409,'ledger_balance_limit_reached');
+    const ledgerError = financialLedgerError(finance);
+    if (ledgerError) return recordSafetyBlock(tx,store,deposit.userId,'deposit_decision',ledgerError,{actorUid:String(actorUid),amountMinor:storedLedgerInt(deposit.amountMinor,0,0,MAX_LEDGER_AMOUNT)});
+    const amount = storedLedgerInt(deposit.amountMinor,-1,1,MAX_LEDGER_AMOUNT);
+    const oldAvailable = storedLedgerInt(balance && balance.availableMinor,decision==='approve'?-1:0,0,MAX_LEDGER_AMOUNT);
+    const globalAvailable=storedLedgerInt(finance.availableLiabilitiesMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const verifiedDeposits=storedLedgerInt(finance.verifiedDepositsMinor,-1,0,MAX_LEDGER_AMOUNT);
+    if (amount < 0 || globalAvailable<0 || verifiedDeposits<0 || decision === 'approve'&&(oldAvailable<0||oldAvailable>MAX_LEDGER_AMOUNT-amount||globalAvailable>MAX_LEDGER_AMOUNT-amount||verifiedDeposits>MAX_LEDGER_AMOUNT-amount)) {
+      return recordSafetyBlock(tx,store,deposit.userId,'deposit_decision','financial_ledger_discrepancy',{actorUid:String(actorUid),amountMinor:amount});
+    }
+    const pendingCount = limitDoc&&Object.hasOwn(limitDoc,'pendingCount')?storedLedgerInt(limitDoc.pendingCount,-1,0,MAX_LEDGER_AMOUNT):0;
+    const globalPending=storedLedgerInt(finance.pendingDeposits,-1,0,MAX_LEDGER_AMOUNT);
+    if(pendingCount<0||globalPending<1) return recordSafetyBlock(tx,store,deposit.userId,'deposit_decision','pending_deposit_counter_discrepancy',{actorUid:String(actorUid)});
     const newStatus = decision === 'approve' ? 'approved' : 'rejected';
     const updates = {
       status:newStatus,decisionBy:actorUid,decisionAt:timestampValue(store),decisionAtMs:now,
@@ -754,40 +1038,54 @@ async function decideDeposit(store, actorUid, depositId, input, config, settings
     };
     tx.set(path,updates,{merge:true});
     tx.set(`transactions/deposit_request_${depositId}`,{status:newStatus,completedAtMs:now,administrativeAction:decision},{merge:true});
+    tx.set(limitPath,{pendingCount:Math.max(0,pendingCount-1),updatedAt:timestampValue(store),updatedAtMs:now},{merge:true});
     if (decision === 'approve') {
       tx.set(userBalancePath,{userId:deposit.userId,currency:deposit.currency,availableMinor:oldAvailable+amount,updatedAt:timestampValue(store)},{merge:true});
       tx.create(creditPath,{id:`deposit_credit_${depositId}`,userId:deposit.userId,type:'deposit_credit',amountMinor:amount,currency:deposit.currency,currencyExponent:deposit.currencyExponent,status:'completed',reference:depositId,providerReference:evidence,verificationMethod:'manual_external_review',createdAt:timestampValue(store),createdAtMs:now,completedAtMs:now});
       tx.set('systemStats/finance',updateFinanceStats(finance,{
-        pendingDeposits:Math.max(0,(Number(finance && finance.pendingDeposits)||0)-1),
-        verifiedDepositsMinor:(Number(finance && finance.verifiedDepositsMinor)||0)+amount,
-        availableLiabilitiesMinor:(Number(finance && finance.availableLiabilitiesMinor)||0)+amount
+        pendingDeposits:globalPending-1,
+        verifiedDepositsMinor:verifiedDeposits+amount,
+        availableLiabilitiesMinor:globalAvailable+amount
       }),{merge:true});
     } else {
-      tx.set('systemStats/finance',updateFinanceStats(finance,{pendingDeposits:Math.max(0,(Number(finance && finance.pendingDeposits)||0)-1)}),{merge:true});
+      tx.set('systemStats/finance',updateFinanceStats(finance,{pendingDeposits:globalPending-1}),{merge:true});
     }
     const logId=crypto.randomUUID();
-    tx.create(`adminLogs/${logId}`,{ id:logId,actorUid:actorUid,action:`deposit.${decision}`,targetUid:deposit.userId,targetId:depositId,details:{ amountMinor:amount,currency:deposit.currency,evidenceReference:evidence,reason },createdAt:timestampValue(store),createdAtMs:now });
-    return { id:depositId,status:newStatus,amountMinor:amount,currency:deposit.currency,manualReview:true };
+    tx.create(`adminLogs/${logId}`,{id:logId,actorUid,action:`deposit.${decision}`,targetUid:deposit.userId,targetId:depositId,details:{amountMinor:amount,currency:deposit.currency,evidenceReference:evidence,reason},createdAt:timestampValue(store),createdAtMs:now});
+    return {id:depositId,status:newStatus,amountMinor:amount,currency:deposit.currency,manualReview:true};
   });
+  if (result && result.blocked) throw new AppError(409,result.code);
+  return result;
 }
 
 async function decideWithdrawal(store, actorUid, withdrawalId, input, config, settings) {
-  if (!settings.payments.withdrawalsEnabled) throw new AppError(503,'withdrawals_not_configured');
   const action = asString(input && input.action,16).toLowerCase();
   if (!['approve','processing','paid','reject','fail'].includes(action)) throw new AppError(400,'invalid_withdrawal_action');
+  const isRelease=['reject','fail'].includes(action);
+  const switches=settings.system&&settings.system.emergencySwitches||{};
+  if(!isRelease&&settings.system&&settings.system.maintenanceMode) throw new AppError(503,'maintenance_mode');
+  if(!isRelease&&(switches.withdrawalsPaused===true||!settings.system||settings.system.realMoneyEnabled!==true||!settings.payments.withdrawalsEnabled)) throw new AppError(503,'withdrawals_not_configured');
+  if(!isRelease&&settings.payments.providerVerified!==true) throw new AppError(503,'payout_provider_not_configured');
   const path=`withdrawals/${withdrawalId}`;
   const now=Date.now();
   const reason=asString(input && input.reason,500);
   const evidence=['paid'].includes(action) ? validateEvidence(input && input.evidenceReference) : null;
   if (['reject','fail'].includes(action) && reason.length<4) throw new AppError(400,'decision_reason_required');
-  return store.runTransaction(async tx=>{
+  const result=await store.runTransaction(async tx=>{
     const withdrawal=await tx.get(path);
     if(!withdrawal) throw new AppError(404,'withdrawal_not_found');
     const balancePath=`balances/${withdrawal.userId}`;
     const [balance,finance]=await Promise.all([tx.get(balancePath),tx.get('systemStats/finance')]);
-    const amount=asInt(withdrawal.amountMinor,0,1,MAX_LEDGER_AMOUNT);
-    const available=asInt(balance&&balance.availableMinor,0,0,MAX_LEDGER_AMOUNT);
-    const reserved=asInt(balance&&balance.reservedMinor,0,0,MAX_LEDGER_AMOUNT);
+    const ledgerError=financialLedgerError(finance);
+    if(ledgerError) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision',ledgerError,{actorUid:String(actorUid)});
+    const amount=storedLedgerInt(withdrawal.amountMinor,-1,1,MAX_LEDGER_AMOUNT);
+    const available=storedLedgerInt(balance&&balance.availableMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const reserved=storedLedgerInt(balance&&balance.reservedMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const globalAvailable=storedLedgerInt(finance.availableLiabilitiesMinor,-1,0,MAX_LEDGER_AMOUNT);
+    const globalReserved=storedLedgerInt(finance.reservedLiabilitiesMinor,-1,0,MAX_LEDGER_AMOUNT);
+    if(amount<0||available<0||reserved<0||globalAvailable<0||globalReserved<0||available+reserved>MAX_LEDGER_AMOUNT) {
+      return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','financial_ledger_discrepancy',{actorUid:String(actorUid)});
+    }
     let status=withdrawal.status;
     let availableMinor=available, reservedMinor=reserved;
     const updates={updatedAt:timestampValue(store),updatedAtMs:now,decisionBy:actorUid,decisionAt:timestampValue(store),decisionAtMs:now};
@@ -799,8 +1097,11 @@ async function decideWithdrawal(store, actorUid, withdrawalId, input, config, se
       status='processing';
     } else if(action==='paid'){
       if(withdrawal.status!=='processing') throw new AppError(409,'withdrawal_not_processing');
-      if(config.payoutProvider!=='manual') throw new AppError(503,'payout_provider_not_configured');
-      if(reserved<amount) throw new AppError(409,'reserved_balance_mismatch');
+      const pendingCount=storedLedgerInt(finance.pendingWithdrawals,-1,0,MAX_LEDGER_AMOUNT);
+      if(pendingCount<1) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','pending_withdrawal_counter_discrepancy',{actorUid:String(actorUid)});
+      if(reserved<amount||globalReserved<amount) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','reserved_balance_mismatch',{actorUid:String(actorUid),amountMinor:amount,reservedMinor:reserved,globalReservedMinor:globalReserved});
+      const verifiedWithdrawals=storedLedgerInt(finance.verifiedWithdrawalsMinor,-1,0,MAX_LEDGER_AMOUNT);
+      if(verifiedWithdrawals<0||verifiedWithdrawals>MAX_LEDGER_AMOUNT-amount) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','financial_ledger_discrepancy',{actorUid:String(actorUid),amountMinor:amount});
       const ledgerPath=`transactions/withdrawal_paid_${withdrawalId}`;
       if(await tx.get(ledgerPath)) throw new AppError(409,'withdrawal_already_paid');
       status='paid';
@@ -810,8 +1111,10 @@ async function decideWithdrawal(store, actorUid, withdrawalId, input, config, se
       tx.create(ledgerPath,{ id:`withdrawal_paid_${withdrawalId}`,userId:withdrawal.userId,type:'withdrawal_paid',amountMinor:amount,currency:withdrawal.currency,currencyExponent:withdrawal.currencyExponent,status:'completed',reference:withdrawalId,providerReference:evidence,verificationMethod:'manual_external_payout',createdAt:timestampValue(store),createdAtMs:now,completedAtMs:now });
     } else {
       if(!['pending','approved','processing'].includes(withdrawal.status)) throw new AppError(409,'withdrawal_not_reversible');
-      if(reserved<amount) throw new AppError(409,'reserved_balance_mismatch');
-      if(available > MAX_LEDGER_AMOUNT-amount) throw new AppError(409,'ledger_balance_limit_reached');
+      const pendingCount=storedLedgerInt(finance.pendingWithdrawals,-1,0,MAX_LEDGER_AMOUNT);
+      if(pendingCount<1) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','pending_withdrawal_counter_discrepancy',{actorUid:String(actorUid)});
+      if(reserved<amount||globalReserved<amount) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','reserved_balance_mismatch',{actorUid:String(actorUid),amountMinor:amount,reservedMinor:reserved,globalReservedMinor:globalReserved});
+      if(available > MAX_LEDGER_AMOUNT-amount||globalAvailable>MAX_LEDGER_AMOUNT-amount) return recordSafetyBlock(tx,store,withdrawal.userId,'withdrawal_decision','financial_ledger_discrepancy',{actorUid:String(actorUid),amountMinor:amount});
       const releasePath=`transactions/withdrawal_release_${withdrawalId}`;
       if(await tx.get(releasePath)) throw new AppError(409,'withdrawal_funds_already_released');
       status=action==='reject'?'rejected':'failed';
@@ -823,20 +1126,22 @@ async function decideWithdrawal(store, actorUid, withdrawalId, input, config, se
     updates.status=status;
     tx.set(path,updates,{merge:true});
     tx.set(balancePath,{availableMinor,reservedMinor,updatedAt:timestampValue(store)},{merge:true});
-    const prevPending=Number(finance&&finance.pendingWithdrawals)||0;
-    const financePatch={reservedLiabilitiesMinor:Math.max(0,(Number(finance&&finance.reservedLiabilitiesMinor)||0)+(reservedMinor-reserved))};
+    const prevPending=storedLedgerInt(finance.pendingWithdrawals,-1,0,MAX_LEDGER_AMOUNT);
+    const financePatch={reservedLiabilitiesMinor:globalReserved+(reservedMinor-reserved)};
     if(status==='paid'){
-      financePatch.pendingWithdrawals=Math.max(0,prevPending-1);
-      financePatch.verifiedWithdrawalsMinor=(Number(finance&&finance.verifiedWithdrawalsMinor)||0)+amount;
+      financePatch.pendingWithdrawals=prevPending-1;
+      financePatch.verifiedWithdrawalsMinor=storedLedgerInt(finance.verifiedWithdrawalsMinor,0,0,MAX_LEDGER_AMOUNT)+amount;
     } else if(status==='rejected'||status==='failed'){
-      financePatch.pendingWithdrawals=Math.max(0,prevPending-1);
-      financePatch.availableLiabilitiesMinor=(Number(finance&&finance.availableLiabilitiesMinor)||0)+amount;
+      financePatch.pendingWithdrawals=prevPending-1;
+      financePatch.availableLiabilitiesMinor=globalAvailable+amount;
     }
     tx.set('systemStats/finance',updateFinanceStats(finance,financePatch),{merge:true});
     const logId=crypto.randomUUID();
     tx.create(`adminLogs/${logId}`,{id:logId,actorUid,action:`withdrawal.${action}`,targetUid:withdrawal.userId,targetId:withdrawalId,details:{amountMinor:amount,currency:withdrawal.currency,evidenceReference:evidence,reason},createdAt:timestampValue(store),createdAtMs:now});
     return {id:withdrawalId,status,amountMinor:amount,currency:withdrawal.currency,manualReview:true};
   });
+  if (result && result.blocked) throw new AppError(409,result.code);
+  return result;
 }
 
 async function getUserFinance(store, uid, settings) {
@@ -969,11 +1274,17 @@ function applySettingsPatch(current, patch, config) {
     if (Object.hasOwn(input,'maintenanceMode')) system.maintenanceMode=input.maintenanceMode===true;
     if (Object.hasOwn(input,'announcement')) system.announcement=asString(input.announcement,500);
     if (Object.hasOwn(input,'realMoneyEnabled')) {
-      if (input.realMoneyEnabled===true && config.paymentProvider==='disabled' && config.payoutProvider==='disabled') throw new AppError(400,'payment_provider_not_configured');
-      system.realMoneyEnabled=input.realMoneyEnabled===true;
+      if (input.realMoneyEnabled===true) throw new AppError(400,'payment_provider_not_configured');
+      system.realMoneyEnabled=false;
     }
     if (Object.hasOwn(input,'rewardBudgetCapMinor') && asInt(input.rewardBudgetCapMinor,0,0,MAX_LEDGER_AMOUNT)>0) throw new AppError(400,'verified_revenue_source_not_configured');
     system.rewardBudgetCapMinor=0;
+    if (Object.hasOwn(input,'emergencySwitches')) {
+      system.emergencySwitches=normalizeEmergencySwitches({...system.emergencySwitches,...cleanDoc(input.emergencySwitches)});
+    }
+    if (Object.hasOwn(input,'safetyLimits')) {
+      system.safetyLimits=normalizeSafetyLimits({...system.safetyLimits,...cleanDoc(input.safetyLimits)});
+    }
     if (Object.hasOwn(input,'supportedPaymentMethods')) system.supportedPaymentMethods=Array.isArray(input.supportedPaymentMethods)?input.supportedPaymentMethods.filter(x=>typeof x==='string'&&/^[a-z0-9_-]{2,32}$/i.test(x)).slice(0,8):[];
   }
   if(Object.hasOwn(raw,'game')) {
@@ -987,8 +1298,9 @@ function applySettingsPatch(current, patch, config) {
   if(Object.hasOwn(raw,'ads')) {
     const input=cleanDoc(raw.ads);
     Object.assign(ads,normalizeAdSettings({...ads,...input,placements:{...ads.placements,...cleanDoc(input.placements)},formats:{...ads.formats,...cleanDoc(input.formats)}}));
+    if(ads.enabled && config.monetagIntegrationVerified!==true) throw new AppError(400,'monetag_integration_not_verified');
     if(ads.enabled && (!config.monetagSdkUrl || !/^\d{1,20}$/.test(ads.mainZoneId))) throw new AppError(400,'monetag_sdk_or_zone_not_configured');
-    if(ads.formats.rewardedInterstitial && !config.monetagPostbackSecret) throw new AppError(400,'monetag_postback_secret_not_configured');
+    if(ads.enabled && ads.formats.rewardedInterstitial && !config.monetagPostbackSecret) throw new AppError(400,'monetag_postback_secret_not_configured');
   }
   if(Object.hasOwn(raw,'payments')) {
     const input=cleanDoc(raw.payments);
@@ -1018,7 +1330,14 @@ async function saveAdminSettings(store, actorUid, patch, config) {
     if(Object.hasOwn(patch,'referrals')) tx.set('referralSettings/current',{...next.referrals,updatedAt:timestampValue(store),updatedAtMs:now,updatedBy:actorUid},{merge:true});
     const id=crypto.randomUUID();
     const changedKeys=Object.keys(patch).filter(k=>['system','game','ads','payments','referrals'].includes(k));
-    tx.create(`adminLogs/${id}`,{id,actorUid,action:'settings.update',targetId:'operational-settings',details:{changedSections:changedKeys},createdAt:timestampValue(store),createdAtMs:now});
+    const changedFields=[];
+    const addPaths=(value,prefix,depth=0)=>{
+      if(changedFields.length>=100) return;
+      if(!value||typeof value!=='object'||Array.isArray(value)||depth>=2){changedFields.push(prefix);return;}
+      for(const [key,child] of Object.entries(value)) addPaths(child,`${prefix}.${key}`,depth+1);
+    };
+    for(const section of changedKeys) addPaths(cleanDoc(patch[section]),section);
+    tx.create(`adminLogs/${id}`,{id,actorUid,action:'settings.update',targetId:'operational-settings',details:{changedSections:changedKeys,changedFields:changedFields.slice(0,100)},createdAt:timestampValue(store),createdAtMs:now});
     return next;
   });
   return result;

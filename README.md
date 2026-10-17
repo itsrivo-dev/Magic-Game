@@ -4,7 +4,7 @@ Mag IA remains the existing fantasy idle RPG: 10 collectible mages, 14 tower flo
 
 The project now also includes an optional Telegram Mini App identity/cloud-save bridge, a Firebase Admin backend, and a separately protected operations console. Standalone play remains available; opening the Account screen does not add an email/password login.
 
-> **Service status:** Source and local automated tests are in place. This checkout is not deployed, Firebase Admin credentials are not configured, Telegram authentication has not been tested against a live bot, and Monetag/payment providers have not been verified. Deposits and withdrawals are disabled by default.
+> **Service status:** Local code/tests are available, but this checkout has not been deployed. The supplied config passes Telegram token/admin-ID *format* checks and can derive a session key; Firebase Admin credentials and admin TOTP are missing. Monetag configuration is incomplete and its callback behavior is unverified. No payment/payout adapter is implemented or verified. Deposits, withdrawals, Monetag ads, and ad rewards are hard-disabled. No live integration has been tested.
 
 ## Play locally
 
@@ -37,7 +37,7 @@ The backend binds to `0.0.0.0` and uses `PORT` when supplied. `/health` reports 
 | Save compatibility | Existing `magia.save.v1` exports/imports remain usable. Cloud migration sanitizes the old save; a local pre-cloud recovery copy is retained when applicable. Importing a game save never changes a real-money balance or transaction history. |
 | UI & feel | Responsive phone/tablet/desktop layout, reduced-motion setting, procedural canvas/SVG art, optional synthesized audio and haptics. |
 
-Magic Coins are **game currency only** and have no cash value. The backend keeps their game-save state separate from the real-money ledger.
+Magic Coins are **game currency only** and have no cash value. The backend keeps their game-save state separate from the real-money ledger. Reward claims use atomic daily/monthly Magic Coin budgets and per-user caps; missing/zero caps block claims. Server-enforced emergency switches and financial caps are exposed in the admin settings page, with MFA required to unpause reward/financial operations or raise limits. The default financial switches are paused and all issuance limits are zero.
 
 ## Architecture
 
@@ -55,14 +55,18 @@ Telegram `initData` is validated server-side with the bot token and an `auth_dat
 
 ## Private configuration
 
-`server/config.js` reads `.env` and the optional `all_details.txt` on the server only. `all_details.txt` is ignored by Git and is not exposed by the web server. The uploaded details were mapped into that local file, but the uploaded Firebase Web SDK values are **not Firebase Admin credentials**. This checkout still needs a Firebase service-account credential (or an explicitly configured credentials path) and a session signing secret before Telegram/cloud persistence can work.
+`server/config.js` reads `.env` and, server-side only, the optional `all_details.txt` / `all details.txt` or `ALL_DETAILS_FILE`. The parser treats legacy JavaScript-shaped text as data; it does not execute uploaded JavaScript. Private file names and credential files are ignored by Git, excluded from Docker build context, and not served by the app. The Arena upload was inspected through a redacted report; its secrets were not copied into tracked files. Its Telegram token/admin ID pass syntax checks only, a session key can be derived, and its Firebase Web SDK values are **not Firebase Admin credentials**. Firebase Admin credentials and `ADMIN_TOTP_SECRET` are missing; the uploaded file's permissions were restricted to owner-only (`0600`) in this sandbox.
 
-For local development, copy/edit the template without committing private values:
+For local development, use a private file with owner-only permissions, or set `ALL_DETAILS_FILE` in your ignored `.env`:
 
 ```sh
 cp all_details.example.txt all_details.txt
+chmod 600 all_details.txt
 cp .env.example .env
+# Optionally: ALL_DETAILS_FILE=/absolute/path/to/private/all_details.txt
 ```
+
+Do not commit the private file. On Railway, an uploaded local file is not automatically available; set secrets as Railway service runtime variables instead.
 
 For Railway, prefer Railway Variables rather than uploading a credential file. At minimum configure:
 
@@ -71,11 +75,11 @@ For Railway, prefer Railway Variables rather than uploading a credential file. A
 - `SESSION_SECRET` — random, at least 32 bytes. Example generator: `openssl rand -hex 32`.
 - `FIREBASE_PROJECT_ID` and `FIREBASE_SERVICE_ACCOUNT_JSON`, or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a private service-account JSON file. The service account needs Firestore access; keep its key out of Git and frontend assets.
 - `ADMIN_TOTP_SECRET` — a private Base32 authenticator secret. Generate a seed locally, add that same seed to an authenticator app, and store it in a password manager; for example, run `node -e "const c=require('node:crypto'),a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',b=c.randomBytes(20);let bits=[...b].map(x=>x.toString(2).padStart(8,'0')).join(''),s='';for(let i=0;i<bits.length;i+=5)s+=a[parseInt(bits.slice(i,i+5).padEnd(5,'0'),2)];console.log(s)"` in a private terminal. Finance admin endpoints remain locked if it is absent.
-- Optional Monetag: `MONETAG_SDK_URL`, `MONETAG_MAIN_ZONE_ID`, `MONETAG_POSTBACK_SECRET`, and optionally `MONETAG_PUBLISHER_ID`. Confirm the SDK URL and postback fields in the Monetag dashboard before enabling anything. The supplied script reference is parsed as HTTPS but has not been tested against Monetag.
+- Monetag fields are recognized for redacted diagnostics (`MONETAG_SDK_URL`, `MONETAG_MAIN_ZONE_ID`, `MONETAG_POSTBACK_SECRET`, `MONETAG_PUBLISHER_ID`, `MONETAG_POLICY_REVIEWED`) but do not activate ads or rewards. The supplied script reference parses as HTTPS only; neither it nor the callback behavior has been tested against Monetag.
 
-Payment settings default to `PAYMENT_PROVIDER=disabled`, `PAYOUT_PROVIDER=disabled`, blank currency, and zero limits. There is no automated Stripe/bank/mobile-money provider adapter in this implementation. The optional `manual` mode is only a human-reviewed request/evidence workflow; it is not provider verification. Keep deposits and withdrawals disabled unless an actual external process/provider has been configured, tested safely, and is supported in your jurisdiction. Never test with real user money. Submitting a reference is not proof of payment, and marking a payout paid requires independent provider confirmation plus an audit reference.
+Deposits and withdrawals are hard-disabled in the backend: `PAYMENT_PROVIDER` / `PAYOUT_PROVIDER` values are parsed for diagnostics but never activate an adapter. The request/decision service code is not an integration with any bank, card, wallet or mobile-money provider. Do not attempt financial tests with real funds. Money operations must remain unavailable until a real provider adapter, callback/evidence semantics, reconciliation, and jurisdictional requirements are implemented and independently tested.
 
-The configuration file included here does **not** contain Firebase Admin credentials, a session secret, Monetag postback secret, payment provider setup, or administrator TOTP secret. No placeholder should be treated as a working credential.
+The supplied config does **not** contain Firebase Admin credentials, an explicit session secret, `ADMIN_TOTP_SECRET`, Monetag publisher/postback credentials, or provider verification. No placeholder should be treated as a working credential. A derived session key is a fallback for local bootstrapping only; set an independent `SESSION_SECRET` in production.
 
 ## Firestore setup
 
@@ -96,17 +100,18 @@ Do not add Firebase browser SDK credentials or direct Firestore access to the ga
 1. Create a Railway service from this repository on Node.js 22 or newer.
 2. Use `npm ci` as the install/build step and `npm start` as the start command. Set `NODE_ENV=production` and `TRUST_PROXY_HOPS=1` for Railway's HTTPS proxy.
 3. Configure Railway health check path `/health`; the server listens on the injected `PORT` and binds to `0.0.0.0`.
-4. Add the required Telegram, session, Firebase, and admin TOTP variables above. Add optional Monetag variables only after provider-side verification. Keep financial workflows disabled.
+4. Use the Railway service Variables screen / Raw Editor for runtime secrets; paste each required variable there (do not rely on a GitHub-private file or an unattached/upload-less volume). Add Telegram, an independent session secret, Firebase Admin JSON, and admin TOTP. No provider/ad feature becomes enabled by entering variables alone; keep them disabled.
 5. Deploy, confirm `/health`, then configure the Telegram Mini App HTTPS URL in BotFather or run `npm run telegram:menu` only after `PUBLIC_APP_URL` is correct. The menu script uses the Telegram Bot API; it was not run here.
-6. Test login with a non-financial test account, cloud migration/recovery, and admin access before enabling any optional provider feature.
+6. Test login with a non-financial test account, cloud migration/recovery, and admin access while money and Monetag remain disabled. Any future provider integration needs separate implementation, policy review, and tests.
 
 No `railway.json` is included: Railway's legacy JSON Config-as-Code path is deprecated for new services. Set start and health-check values in the Railway service settings instead.
 
 ## Monetag and real-money boundaries
 
-- Monetag is disabled until server config and runtime settings are complete. A frontend SDK Promise/click is not proof of a valued impression. Rewarded Magic Coins require a matching server-side Monetag postback and an idempotent claim.
-- Estimated ad price is not settled cash. The admin overview reports settled advertising revenue as unavailable/unverified and holds the reward budget at zero without verified revenue.
-- Deposit/withdrawal records use a separate minor-unit currency ledger with idempotency keys, atomic balance/liability changes, reserved withdrawal funds, evidence references, rate limits and audit logs. Manual approval is explicitly labeled as manual external review; the code does not call a payment processor or verify a provider receipt itself.
+- Monetag and ad rewards are hard-disabled. The existing callback-shaped code is not treated as a verified provider adapter; adding an SDK URL/zone/postback secret or marking a policy review complete is insufficient to enable it.
+- Do not assume frontend SDK events or the current callback field names match Monetag's current official semantics. Verify against the provider's documentation, implement the supported signature/replay protections, and test with provider-approved non-financial test events before changing the fail-closed gate.
+- Estimated ad price is not settled cash. The admin overview reports settled advertising revenue as unavailable/unverified and keeps cash reward budgets at zero.
+- The dormant deposit/withdrawal service methods maintain a separate minor-unit ledger with idempotency keys, atomic liability changes, reserved withdrawal funds, limits and audit logs. The HTTP workflows remain disabled; a human-entered evidence reference is not provider verification. Automated tests use only synthetic MemoryStore data and never move real funds.
 - No live Telegram, Firebase, Monetag, payment-provider or Railway connection/deployment has been verified in this workspace.
 
 ## Checks run locally
@@ -117,4 +122,4 @@ npm run check
 npm test
 ```
 
-`npm test` uses Node's test runner, jsdom for the existing game UI/save compatibility seam, a MemoryStore that rejects Firestore-style reads after writes, and native HTTP against the Express app. It covers Telegram signature checks, sessions/TOTP, routes, save sanitization and sync limits, referrals, idempotency, finance liability transitions, admin access, and recovery backups. It does **not** connect to a real Firebase project or external provider, test actual Telegram WebApp `initData`, exercise a live browser/device, or deploy the service. Report only these local tests as verified.
+`npm test` currently passes 24 tests using Node's test runner, jsdom for the existing game UI/save compatibility seam, a MemoryStore that rejects Firestore-style reads after writes, and native HTTP against Express. Coverage includes Telegram signature checks, sessions/TOTP, save compatibility/sanitization, server-side emergency switches, reward/financial caps, blocked-operation audit events, provider-off gates, synthetic ledger idempotency/liability transitions, admin access and recovery backups. Synthetic ledger tests use in-memory records only; they do not move money. The suite does **not** connect to Firebase, verify Telegram with a live bot, contact Monetag/payment APIs, exercise a live device, build the Docker image (Docker is not installed in the workspace), or deploy. Report only these local checks as verified.

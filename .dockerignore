@@ -1,0 +1,23 @@
+# Never send credentials or local-only secrets to a remote Docker builder.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+all_details.txt
+all details.txt
+all_details.local.txt
+service-account*.json
+credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependencies, tests, local output, and editor files.
+node_modules
+coverage
+build
+dist
+.DS_Store
+npm-debug.log*

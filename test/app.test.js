@@ -58,6 +58,10 @@ test('native HTTP app verifies Telegram identity, protects admin APIs, migrates 
   assert.equal(gameSettings.response.status,200);
   const lockedSettings=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:adminSession,body:{settings:{payments:{depositsEnabled:true}}}});
   assert.equal(lockedSettings.response.status,403);assert.equal(lockedSettings.data.error,'admin_mfa_required');
+  const lockedUnpause=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:adminSession,body:{settings:{system:{emergencySwitches:{magicCoinRewardsPaused:false}}}}});
+  assert.equal(lockedUnpause.response.status,403);assert.equal(lockedUnpause.data.error,'admin_mfa_required');
+  const lockedRewardIncrease=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:adminSession,body:{settings:{referrals:{rewardMagicCoins:100}}}});
+  assert.equal(lockedRewardIncrease.response.status,403);assert.equal(lockedRewardIncrease.data.error,'admin_mfa_required');
   const summaryBeforeMfa=await jsonRequest(base,'/api/admin/summary',{cookie:adminSession,origin:false});
   assert.equal(summaryBeforeMfa.response.status,200);assert.equal(summaryBeforeMfa.data.finance.locked,true);assert.equal(summaryBeforeMfa.data.finance.verifiedDepositsMinor,null);
   assert.ok(summaryBeforeMfa.data.recentActions.every(row=>!Object.hasOwn(row,'details')));
@@ -73,8 +77,23 @@ test('native HTTP app verifies Telegram identity, protects admin APIs, migrates 
   assert.equal(adminMe.response.status,200);assert.equal(adminMe.data.mfaVerified,true);
   const deposits=await jsonRequest(base,'/api/admin/deposits',{cookie:combined,origin:false});
   assert.equal(deposits.response.status,200);assert.deepEqual(deposits.data.deposits,[]);
+  const runtimeSettings=await jsonRequest(base,'/api/admin/settings',{cookie:combined,origin:false});
+  assert.equal(runtimeSettings.response.status,200);assert.equal(runtimeSettings.data.payments.providerVerified,false);assert.equal(runtimeSettings.data.payments.depositsEnabled,false);
+  assert.equal(runtimeSettings.data.secretStatus.monetagIntegrationVerified,false);
+  const serializedSettings=JSON.stringify(runtimeSettings.data);
+  assert.doesNotMatch(serializedSettings,/test-session-secret|test-telegram-bot-token|JBSWY3DPEHPK3PXP/);
+  const disabledDeposit=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:combined,body:{settings:{payments:{depositsEnabled:true}}}});
+  assert.equal(disabledDeposit.response.status,400);assert.equal(disabledDeposit.data.error,'deposit_provider_not_configured');
+  const disabledAds=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:combined,body:{settings:{ads:{enabled:true}}}});
+  assert.equal(disabledAds.response.status,400);assert.equal(disabledAds.data.error,'monetag_integration_not_verified');
   const summaryAfterMfa=await jsonRequest(base,'/api/admin/summary',{cookie:combined,origin:false});assert.equal(summaryAfterMfa.data.finance.locked,false);
   const logsAfterMfa=await jsonRequest(base,'/api/admin/logs',{cookie:combined,origin:false});assert.equal(logsAfterMfa.response.status,200);
+  const maintenance=await jsonRequest(base,'/api/admin/settings',{method:'PATCH',cookie:combined,body:{settings:{system:{maintenanceMode:true}}}});
+  assert.equal(maintenance.response.status,200);assert.ok(maintenance.data.settings.system.maintenanceMode);
+  const pausedAdSession=await jsonRequest(base,'/api/ads/reward-session',{method:'POST',cookie:session,body:{}});
+  assert.equal(pausedAdSession.response.status,503);assert.equal(pausedAdSession.data.error,'maintenance_mode');
+  const pausedSync=await jsonRequest(base,'/api/game/sync',{method:'POST',cookie:session,body:{state:game.data.state,version:game.data.version}});
+  assert.equal(pausedSync.response.status,503);assert.equal(pausedSync.data.error,'maintenance_mode');
 });
 
 test('state-changing routes reject missing origin/request protections',async t=>{

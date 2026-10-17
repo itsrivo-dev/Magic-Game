@@ -9,7 +9,7 @@
     "adminTelegramId": "__SET_ADMIN_TELEGRAM_ID__",
     "botUsername": "",
     "miniAppShortName": "",
-    "webAppUrl": ""
+    "initDataMaxAgeSeconds": 3600
   },
   "session": {
     "secret": "__GENERATE_A_RANDOM_SECRET_OF_AT_LEAST_32_BYTES__"
@@ -23,15 +23,13 @@
     "mainZoneId": "",
     "sdkUrl": "",
     "postbackSecret": "",
-    "enabled": false
+    "policyReviewed": false
   },
   "payments": {
     "provider": "disabled",
     "payoutProvider": "disabled",
     "currency": "",
     "currencyExponent": 2,
-    "manualPaymentMethods": [],
-    "manualInstructions": "",
     "minimumDepositMinor": 0,
     "maximumDepositMinor": 0,
     "minimumWithdrawalMinor": 0,
@@ -39,5 +37,35 @@
   },
   "admin": {
     "totpSecret": ""
+  },
+  "defaults": {
+    "system": {
+      "emergencySwitches": {
+        "depositsPaused": true,
+        "withdrawalsPaused": true,
+        "cashRewardsPaused": true,
+        "magicCoinRewardsPaused": true,
+        "referralsPaused": false,
+        "referralRewardsPaused": true,
+        "monetizationPaused": true
+      },
+      "safetyLimits": {
+        "maxPendingWithdrawalLiabilityMinor": 0,
+        "maxPendingWithdrawalPerUserMinor": 0,
+        "maxWithdrawalsPerUserDaily": 0,
+        "maxWithdrawalPerUserDailyMinor": 0,
+        "maxPendingDepositsPerUser": 0,
+        "maxDepositsPerUserDaily": 0,
+        "maxDepositPerUserDailyMinor": 0,
+        "maxMagicCoinsPerReward": 0,
+        "maxMagicCoinsPerUserDaily": 0,
+        "dailyMagicCoinsRewardBudget": 0,
+        "monthlyMagicCoinsRewardBudget": 0,
+        "maxCashRewardPerUserMinor": 0,
+        "dailyCashRewardBudgetMinor": 0,
+        "monthlyCashRewardBudgetMinor": 0,
+        "maxTotalCashRewardLiabilityMinor": 0
+      }
+    }
   }
 }
