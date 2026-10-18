@@ -449,8 +449,14 @@ function loadConfig(options = {}) {
   }
 
   const appUrlRaw = envOrFile(env, 'PUBLIC_APP_URL', publicSettings.appUrl || telegram.webAppUrl || telegram.miniAppUrl);
-  const publicAppUrl = validHttpsUrl(appUrlRaw, { allowLoopbackHttp: true }) || '';
-  if (appUrlRaw && !publicAppUrl) invalidValues.push('PUBLIC_APP_URL');
+  // Railway injects the service's real public domain at runtime; use it only
+  // when no explicit URL was configured. Never invent or hardcode a URL.
+  const railwayDomain = clean(env.RAILWAY_PUBLIC_DOMAIN);
+  const railwayAppUrl = railwayDomain && !appUrlRaw && /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(railwayDomain)
+    ? `https://${railwayDomain}`
+    : '';
+  const publicAppUrl = validHttpsUrl(appUrlRaw || railwayAppUrl, { allowLoopbackHttp: true }) || '';
+  if ((appUrlRaw || railwayAppUrl) && !publicAppUrl) invalidValues.push('PUBLIC_APP_URL');
 
   const botUsernameRaw = envOrFile(env, 'TELEGRAM_BOT_USERNAME', publicSettings.botUsername || telegram.botUsername);
   const telegramBotUsername = botUsernameRaw ? botUsernameRaw.replace(/^@/, '') : '';

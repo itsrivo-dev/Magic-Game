@@ -4,7 +4,7 @@ Mag IA remains the existing fantasy idle RPG: 10 collectible mages, 14 tower flo
 
 The project now also includes an optional Telegram Mini App identity/cloud-save bridge, a Firebase Admin backend, and a separately protected operations console. Standalone play remains available; opening the Account screen does not add an email/password login.
 
-> **Service status:** Local code/tests are available, but this checkout has not been deployed. The supplied config passes Telegram token/admin-ID *format* checks and can derive a session key; Firebase Admin credentials and admin TOTP are missing. Monetag configuration is incomplete and its callback behavior is unverified. No payment/payout adapter is implemented or verified. Deposits, withdrawals, Monetag ads, and ad rewards are hard-disabled. No live integration has been tested.
+> **Service status (this checkout, with the supplied `all_details.txt`):** Telegram bot token and admin ID pass format validation and Telegram `initData` verification is exercised locally with synthetic payloads; a session key is derived. Firebase **Web SDK** values (project `mag-ai-7f17c`) are public client settings and are loaded; **Firebase Admin service-account credentials are not present in the file**, so Firestore-backed cloud APIs fail closed. Monetag SDK URL and zone `12051648` parse successfully, but the Monetag integration is unverified and stays disabled. No payment provider is included; deposits and withdrawals are hard-disabled. Administrator TOTP is not set, so finance administration stays locked. No live Telegram, Firebase, Monetag, payment, or Railway connection has been made from this workspace.
 
 ## Play locally
 
@@ -53,29 +53,45 @@ Magic Coins are **game currency only** and have no cash value. The backend keeps
 
 Telegram `initData` is validated server-side with the bot token and an `auth_date` age check. A client-supplied Telegram ID, admin flag, balance, payment reference, or save is not accepted as identity or financial authority. Game saves are normalized and versioned with conservative sync-delta checks. They are **not** a full server-side simulation of every idle/combat event, so they should not be represented as an anti-cheat guarantee; this is safe only because Magic Coins are not money or a cash-equivalent reward.
 
-## Private configuration
+## Automatic configuration from all_details.txt
 
-`server/config.js` reads `.env` and, server-side only, the optional `all_details.txt` / `all details.txt` or `ALL_DETAILS_FILE`. The parser treats legacy JavaScript-shaped text as data; it does not execute uploaded JavaScript. Private file names and credential files are ignored by Git, excluded from Docker build context, and not served by the app. The Arena upload was inspected through a redacted report; its secrets were not copied into tracked files. Its Telegram token/admin ID pass syntax checks only, a session key can be derived, and its Firebase Web SDK values are **not Firebase Admin credentials**. Firebase Admin credentials and `ADMIN_TOTP_SECRET` are missing; the uploaded file's permissions were restricted to owner-only (`0600`) in this sandbox.
-
-For local development, use a private file with owner-only permissions, or set `ALL_DETAILS_FILE` in your ignored `.env`:
+The project is configured automatically from a single private details file. You only need to supply `all_details.txt`; do not copy values into multiple files.
 
 ```sh
-cp all_details.example.txt all_details.txt
-chmod 600 all_details.txt
-cp .env.example .env
-# Optionally: ALL_DETAILS_FILE=/absolute/path/to/private/all_details.txt
+npm run configure          # validate + print a redacted report
+npm run configure:apply    # also write a local .env pointer (git-ignored)
 ```
 
-Do not commit the private file. On Railway, an uploaded local file is not automatically available; set secrets as Railway service runtime variables instead.
+`server/config.js` loads values from, in priority order: explicit environment variables, `ALL_DETAILS_JSON`, `ALL_DETAILS_TEXT`, `ALL_DETAILS_FILE`, then `all_details.txt` at the project root. The parser treats legacy JavaScript-shaped text as **data**; it never executes uploaded JavaScript. Every supported entry is read, validated, and applied:
 
-For Railway, prefer Railway Variables rather than uploading a credential file. At minimum configure:
+- Telegram bot token and admin ID (server-side only; the token is never sent to any client)
+- Telegram Mini App URL/username/short-name settings
+- Firebase Web SDK config (public client values) and project ID
+- Firebase Admin SDK credentials (service-account JSON or `GOOGLE_APPLICATION_CREDENTIALS` file)
+- Monetag publisher ID, zone IDs, SDK URL, postback secret, policy flag
+- Payment provider fields (parsed for diagnostics only — payments stay disabled)
+- Session secret, admin TOTP, financial safety limits, and system defaults
 
-- `PUBLIC_APP_URL` — the deployed HTTPS game URL.
-- `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_ID` — private server variables. Set `TELEGRAM_BOT_USERNAME`; set `TELEGRAM_MINI_APP_SHORT_NAME` if using a named Mini App link.
-- `SESSION_SECRET` — random, at least 32 bytes. Example generator: `openssl rand -hex 32`.
-- `FIREBASE_PROJECT_ID` and `FIREBASE_SERVICE_ACCOUNT_JSON`, or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a private service-account JSON file. The service account needs Firestore access; keep its key out of Git and frontend assets.
-- `ADMIN_TOTP_SECRET` — a private Base32 authenticator secret. Generate a seed locally, add that same seed to an authenticator app, and store it in a password manager; for example, run `node -e "const c=require('node:crypto'),a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',b=c.randomBytes(20);let bits=[...b].map(x=>x.toString(2).padStart(8,'0')).join(''),s='';for(let i=0;i<bits.length;i+=5)s+=a[parseInt(bits.slice(i,i+5).padEnd(5,'0'),2)];console.log(s)"` in a private terminal. Finance admin endpoints remain locked if it is absent.
-- Monetag fields are recognized for redacted diagnostics (`MONETAG_SDK_URL`, `MONETAG_MAIN_ZONE_ID`, `MONETAG_POSTBACK_SECRET`, `MONETAG_PUBLISHER_ID`, `MONETAG_POLICY_REVIEWED`) but do not activate ads or rewards. The supplied script reference parses as HTTPS only; neither it nor the callback behavior has been tested against Monetag.
+A derived session key (HKDF from the bot token) is used only as a local bootstrap fallback; set an independent `SESSION_SECRET` in production.
+
+**Security:** private credentials exist only on the server. Nothing secret is written to frontend JavaScript, `index.html`, public assets, or client bundles; nothing secret is printed in logs or error messages (diagnostics are redacted status codes only). `all_details.txt` is git-ignored and excluded from the Docker build context. Do not commit a file containing real secrets.
+
+## Deploying to Railway with minimal manual setup
+
+Railway cannot read a local file, and a GitHub file is not automatically available to the runtime either. The supported method is a single Railway **private variable** carrying the whole file:
+
+```sh
+railway variables set "ALL_DETAILS_TEXT=$(cat all_details.txt)"
+```
+
+or paste the full contents of `all_details.txt` as the value of `ALL_DETAILS_TEXT` in the Railway Variables UI. The server parses and validates it at boot — no per-value entry is required. `railway.json` is intentionally not used (Railway's legacy JSON Config-as-Code path is deprecated for new services); the Dockerfile sets `NODE_ENV=production`, `TRUST_PROXY_HOPS=1`, the start command `npm start`, and health check path `/health`.
+
+After the first deploy, Railway generates the real public HTTPS URL. Identify it from the Railway dashboard (or `railway domain`) — never invent it — then either:
+
+- set `PUBLIC_APP_URL` to that URL and redeploy/restart: the server configures the Telegram menu button automatically at boot through the Bot API (verified via `getChatMenuButton`); or
+- run `npm run telegram:menu` once with `PUBLIC_APP_URL` set. If automatic setup is unavailable, do it manually in @BotFather: `/setmenubutton` → select your bot → **Web App** → button text `Open Mag IA` → URL `https://<your-railway-domain>/`.
+
+If any required value is absent (for example Firebase Admin credentials), the app still starts and reports the gap truthfully; affected APIs fail closed rather than pretending to work.
 
 Deposits and withdrawals are hard-disabled in the backend: `PAYMENT_PROVIDER` / `PAYOUT_PROVIDER` values are parsed for diagnostics but never activate an adapter. The request/decision service code is not an integration with any bank, card, wallet or mobile-money provider. Do not attempt financial tests with real funds. Money operations must remain unavailable until a real provider adapter, callback/evidence semantics, reconciliation, and jurisdictional requirements are implemented and independently tested.
 
@@ -97,14 +113,12 @@ Do not add Firebase browser SDK credentials or direct Firestore access to the ga
 
 ## Railway deployment outline
 
-1. Create a Railway service from this repository on Node.js 22 or newer.
-2. Use `npm ci` as the install/build step and `npm start` as the start command. Set `NODE_ENV=production` and `TRUST_PROXY_HOPS=1` for Railway's HTTPS proxy.
-3. Configure Railway health check path `/health`; the server listens on the injected `PORT` and binds to `0.0.0.0`.
-4. Use the Railway service Variables screen / Raw Editor for runtime secrets; paste each required variable there (do not rely on a GitHub-private file or an unattached/upload-less volume). Add Telegram, an independent session secret, Firebase Admin JSON, and admin TOTP. No provider/ad feature becomes enabled by entering variables alone; keep them disabled.
-5. Deploy, confirm `/health`, then configure the Telegram Mini App HTTPS URL in BotFather or run `npm run telegram:menu` only after `PUBLIC_APP_URL` is correct. The menu script uses the Telegram Bot API; it was not run here.
-6. Test login with a non-financial test account, cloud migration/recovery, and admin access while money and Monetag remain disabled. Any future provider integration needs separate implementation, policy review, and tests.
+1. Create a Railway service from this repository (Node.js 22+; the included Dockerfile is used automatically).
+2. Set the single private variable `ALL_DETAILS_TEXT` to the full contents of `all_details.txt` (see "Deploying to Railway" above). Optionally set `PUBLIC_APP_URL` after the first deploy.
+3. Deploy, confirm `/health` reports `telegramConfigured:true`, then set the Telegram Mini App HTTPS URL in BotFather (or let the server configure the menu button automatically once `PUBLIC_APP_URL` is correct).
+4. To enable cloud saves, add the Firebase Admin service-account JSON (`FIREBASE_SERVICE_ACCOUNT_JSON`) and deploy `firestore.rules` / `firestore.indexes.json` from a trusted environment with the Firebase CLI. To unlock finance administration, add `ADMIN_TOTP_SECRET`. Monetag and payments remain disabled until their respective verified integrations exist.
 
-No `railway.json` is included: Railway's legacy JSON Config-as-Code path is deprecated for new services. Set start and health-check values in the Railway service settings instead.
+No `railway.json` is included: Railway's legacy JSON Config-as-Code path is deprecated for new services. Start command and health check are defined in the Dockerfile; the server listens on the injected `PORT` and binds `0.0.0.0`.
 
 ## Monetag and real-money boundaries
 
@@ -122,4 +136,4 @@ npm run check
 npm test
 ```
 
-`npm test` currently passes 24 tests using Node's test runner, jsdom for the existing game UI/save compatibility seam, a MemoryStore that rejects Firestore-style reads after writes, and native HTTP against Express. Coverage includes Telegram signature checks, sessions/TOTP, save compatibility/sanitization, server-side emergency switches, reward/financial caps, blocked-operation audit events, provider-off gates, synthetic ledger idempotency/liability transitions, admin access and recovery backups. Synthetic ledger tests use in-memory records only; they do not move money. The suite does **not** connect to Firebase, verify Telegram with a live bot, contact Monetag/payment APIs, exercise a live device, build the Docker image (Docker is not installed in the workspace), or deploy. Report only these local checks as verified.
+`npm test` currently passes 29 tests using Node's test runner, jsdom for the existing game UI/save compatibility seam, a MemoryStore that rejects Firestore-style reads after writes, and native HTTP against Express. Coverage includes Telegram signature checks, sessions/TOTP, save compatibility/sanitization, server-side emergency switches, reward/financial caps, blocked-operation audit events, provider-off gates, synthetic ledger idempotency/liability transitions, admin access and recovery backups, and the details-file configuration pipeline (parsing, redaction, Railway payload round-trip, fail-closed menu helper). Synthetic ledger tests use in-memory records only; they do not move money. The suite does **not** connect to Firebase, verify Telegram with a live bot, contact Monetag/payment APIs, exercise a live device, build the Docker image (Docker is not installed in the workspace), or deploy. Report only these local checks as verified.
